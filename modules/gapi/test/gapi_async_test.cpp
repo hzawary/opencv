@@ -13,6 +13,7 @@
 
 #include <condition_variable>
 #include <stdexcept>
+#include <thread>
 
 namespace opencv_test
 {
@@ -206,7 +207,7 @@ struct CallBack: crtp_cast<crtp_final_t> {
             mtx.unlock();
             cv.notify_one();
         };
-    };
+    }
 
     template<typename... Args >
     void start_async(Args&&... args){

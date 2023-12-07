@@ -96,7 +96,7 @@ public:
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
 #ifdef HAVE_INF_ENGINE
-        if (backendId == DNN_BACKEND_INFERENCE_ENGINE_NN_BUILDER_2019 || backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+        if (backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
         {
             bool isMyriad = preferableTarget == DNN_TARGET_MYRIAD || preferableTarget == DNN_TARGET_HDDL;
             return !isMyriad;
@@ -338,32 +338,6 @@ public:
         layerOutputs[0].col(2).copyTo(dst);
     }
 
-#ifdef HAVE_DNN_IE_NN_BUILDER_2019
-    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
-    {
-        InferenceEngine::Builder::ProposalLayer ieLayer(name);
-
-        ieLayer.setBaseSize(baseSize);
-        ieLayer.setFeatStride(featStride);
-        ieLayer.setMinSize(16);
-        ieLayer.setNMSThresh(nmsThreshold);
-        ieLayer.setPostNMSTopN(keepTopAfterNMS);
-        ieLayer.setPreNMSTopN(keepTopBeforeNMS);
-
-        std::vector<float> scalesVec(scales.size());
-        for (int i = 0; i < scales.size(); ++i)
-            scalesVec[i] = scales.get<float>(i);
-        ieLayer.setScale(scalesVec);
-
-        std::vector<float> ratiosVec(ratios.size());
-        for (int i = 0; i < ratios.size(); ++i)
-            ratiosVec[i] = ratios.get<float>(i);
-        ieLayer.setRatio(ratiosVec);
-
-        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
-    }
-#endif  // HAVE_DNN_IE_NN_BUILDER_2019
-
 
 #ifdef HAVE_DNN_NGRAPH
     virtual Ptr<BackendNode> initNgraph(const std::vector<Ptr<BackendWrapper> >& inputs,
@@ -392,10 +366,10 @@ public:
         auto& class_logits = nodes[1].dynamicCast<InfEngineNgraphNode>()->node;
         auto& image_shape  = nodes[2].dynamicCast<InfEngineNgraphNode>()->node;
 
-        CV_Assert_N(image_shape->get_shape().size() == 2, image_shape->get_shape().front() == 1);
+        CV_Assert_N(image_shape.get_shape().size() == 2, image_shape.get_shape().front() == 1);
         auto shape   = std::make_shared<ngraph::op::Constant>(ngraph::element::i64,
                        ngraph::Shape{1},
-                       std::vector<int64_t>{(int64_t)image_shape->get_shape().back()});
+                       std::vector<int64_t>{(int64_t)image_shape.get_shape().back()});
         auto reshape = std::make_shared<ngraph::op::v1::Reshape>(image_shape, shape, true);
 
         auto proposal = std::make_shared<ngraph::op::Proposal>(class_probs, class_logits, reshape, attr);

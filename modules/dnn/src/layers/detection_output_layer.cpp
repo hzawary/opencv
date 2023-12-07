@@ -221,7 +221,7 @@ public:
     {
         return backendId == DNN_BACKEND_OPENCV ||
                (backendId == DNN_BACKEND_CUDA && !_groupByClasses) ||
-               ((backendId == DNN_BACKEND_INFERENCE_ENGINE_NN_BUILDER_2019 || backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH) && !_locPredTransposed && _bboxesNormalized);
+               backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH;
     }
 
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
@@ -1001,38 +1001,35 @@ public:
     }
 #endif
 
-#ifdef HAVE_DNN_IE_NN_BUILDER_2019
-    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
-    {
-        InferenceEngine::Builder::DetectionOutputLayer ieLayer(name);
-
-        ieLayer.setNumClasses(_numClasses);
-        ieLayer.setShareLocation(_shareLocation);
-        ieLayer.setBackgroudLabelId(_backgroundLabelId);
-        ieLayer.setNMSThreshold(_nmsThreshold);
-        ieLayer.setTopK(_topK > 0 ? _topK : _keepTopK);
-        ieLayer.setKeepTopK(_keepTopK);
-        ieLayer.setConfidenceThreshold(_confidenceThreshold);
-        ieLayer.setVariantEncodedInTarget(_varianceEncodedInTarget);
-        ieLayer.setCodeType("caffe.PriorBoxParameter." + _codeType);
-        ieLayer.setInputPorts(std::vector<InferenceEngine::Port>(3));
-
-        InferenceEngine::Builder::Layer l = ieLayer;
-        l.getParameters()["eta"] = std::string("1.0");
-        l.getParameters()["clip"] = _clip;
-
-        return Ptr<BackendNode>(new InfEngineBackendNode(l));
-    }
-#endif  // HAVE_DNN_IE_NN_BUILDER_2019
-
 
 #ifdef HAVE_DNN_NGRAPH
     virtual Ptr<BackendNode> initNgraph(const std::vector<Ptr<BackendWrapper> >& inputs, const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
     {
         CV_Assert(nodes.size() == 3);
-        auto& box_logits  = nodes[0].dynamicCast<InfEngineNgraphNode>()->node;
-        auto& class_preds = nodes[1].dynamicCast<InfEngineNgraphNode>()->node;
-        auto& proposals   = nodes[2].dynamicCast<InfEngineNgraphNode>()->node;
+        auto box_logits  = nodes[0].dynamicCast<InfEngineNgraphNode>()->node;
+        auto class_preds = nodes[1].dynamicCast<InfEngineNgraphNode>()->node;
+        auto proposals   = nodes[2].dynamicCast<InfEngineNgraphNode>()->node;
+
+        if (_locPredTransposed) {
+            // Convert box predictions from yxYX to xyXY
+            box_logits = std::make_shared<ngraph::op::v1::Reshape>(box_logits,
+                std::make_shared<ngraph::op::Constant>(ngraph::element::i32, ngraph::Shape{3}, std::vector<int32_t>{0, -1, 2}),
+                true
+            );
+            int axis = 2;
+            box_logits = std::make_shared<ngraph::op::v1::Reverse>(box_logits,
+                std::make_shared<ngraph::op::Constant>(ngraph::element::i32, ngraph::Shape{1}, &axis),
+                ngraph::op::v1::Reverse::Mode::INDEX
+            );
+        }
+
+        auto shape = std::make_shared<ngraph::op::Constant>(ngraph::element::i32, ngraph::Shape{2}, std::vector<int32_t>{0, -1});
+        box_logits = std::make_shared<ngraph::op::v1::Reshape>(box_logits, shape, true);
+        class_preds = std::make_shared<ngraph::op::v1::Reshape>(class_preds, shape, true);
+        proposals = std::make_shared<ngraph::op::v1::Reshape>(proposals,
+            std::make_shared<ngraph::op::Constant>(ngraph::element::i32, ngraph::Shape{3}, std::vector<int32_t>{0, _varianceEncodedInTarget ? 1 : 2, -1}),
+            true
+        );
 
         ngraph::op::DetectionOutputAttrs attrs;
         attrs.num_classes                = _numClasses;

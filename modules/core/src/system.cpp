@@ -42,6 +42,7 @@
 //M*/
 
 #include "precomp.hpp"
+#include <atomic>
 #include <iostream>
 #include <ostream>
 
@@ -55,17 +56,8 @@
 
 #include <opencv2/core/utils/filesystem.private.hpp>
 
-#ifndef OPENCV_WITH_THREAD_SANITIZER
-  #if defined(__clang__) && defined(__has_feature)
-  #if __has_feature(thread_sanitizer)
-      #define OPENCV_WITH_THREAD_SANITIZER 1
-      #include <atomic>  // assume C++11
-  #endif
-  #endif
-#endif
-#ifndef OPENCV_WITH_THREAD_SANITIZER
-    #define OPENCV_WITH_THREAD_SANITIZER 0
-#endif
+#include <opencv2/core/utils/fp_control_utils.hpp>
+#include <opencv2/core/utils/fp_control.private.hpp>
 
 namespace cv {
 
@@ -162,6 +154,12 @@ void* allocSingletonNewBuffer(size_t size) { return malloc(size); }
 # endif
 #endif
 
+#if defined __loongarch64
+#include "sys/auxv.h"
+#define LA_HWCAP_LSX   (1<<4)
+#define LA_HWCAP_LASX  (1<<5)
+#endif
+
 #if defined _WIN32 || defined WINCE
 #ifndef _WIN32_WINNT           // This is needed for the declaration of TryEnterCriticalSection in winbase.h with Visual Studio 2005 (and older?)
   #define _WIN32_WINNT 0x0400  // http://msdn.microsoft.com/en-us/library/ms686857(VS.85).aspx
@@ -244,6 +242,7 @@ std::wstring GetTempFileNameWinRT(std::wstring prefix)
 #if defined __MACH__ && defined __APPLE__
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <sys/sysctl.h>
 #endif
 
 #endif
@@ -302,6 +301,9 @@ DECLARE_CV_CPUID_X86
   #endif
 #endif
 
+#if defined CV_CXX11
+  #include <chrono>
+#endif
 
 namespace cv
 {
@@ -411,6 +413,9 @@ struct HWFeatures
         g_hwFeatureNames[CPU_AVX_5124FMAPS] = "AVX5124FMAPS";
 
         g_hwFeatureNames[CPU_NEON] = "NEON";
+        g_hwFeatureNames[CPU_NEON_DOTPROD] = "NEON_DOTPROD";
+        g_hwFeatureNames[CPU_NEON_FP16] = "NEON_FP16";
+        g_hwFeatureNames[CPU_NEON_BF16] = "NEON_BF16";
 
         g_hwFeatureNames[CPU_VSX] = "VSX";
         g_hwFeatureNames[CPU_VSX3] = "VSX3";
@@ -427,6 +432,9 @@ struct HWFeatures
         g_hwFeatureNames[CPU_AVX512_ICL] = "AVX512-ICL";
 
         g_hwFeatureNames[CPU_RVV] = "RVV";
+
+        g_hwFeatureNames[CPU_LSX]  = "LSX";
+        g_hwFeatureNames[CPU_LASX] = "LASX";
     }
 
     void initialize(void)
@@ -558,6 +566,29 @@ struct HWFeatures
     #ifdef __aarch64__
         have[CV_CPU_NEON] = true;
         have[CV_CPU_FP16] = true;
+        int cpufile = open("/proc/self/auxv", O_RDONLY);
+
+        if (cpufile >= 0)
+        {
+            Elf64_auxv_t auxv;
+            const size_t size_auxv_t = sizeof(auxv);
+
+            while ((size_t)read(cpufile, &auxv, size_auxv_t) == size_auxv_t)
+            {
+                // see https://elixir.bootlin.com/linux/latest/source/arch/arm64/include/uapi/asm/hwcap.h
+                if (auxv.a_type == AT_HWCAP)
+                {
+                    have[CV_CPU_NEON_DOTPROD] = (auxv.a_un.a_val & (1 << 20)) != 0; // HWCAP_ASIMDDP
+                    have[CV_CPU_NEON_FP16] = (auxv.a_un.a_val & (1 << 10)) != 0; // HWCAP_ASIMDHP
+                }
+                else if (auxv.a_type == AT_HWCAP2)
+                {
+                    have[CV_CPU_NEON_BF16] = (auxv.a_un.a_val & (1 << 14)) != 0; // HWCAP2_BF16
+                }
+            }
+
+            close(cpufile);
+        }
     #elif defined __arm__ && defined __ANDROID__
       #if defined HAVE_CPUFEATURES
         CV_LOG_INFO(NULL, "calling android_getCpuFeatures() ...");
@@ -601,15 +632,40 @@ struct HWFeatures
             close(cpufile);
         }
     #endif
-    #elif (defined __clang__ || defined __APPLE__)
+    #elif (defined __APPLE__)
     #if (defined __ARM_NEON__ || (defined __ARM_NEON && defined __aarch64__))
         have[CV_CPU_NEON] = true;
     #endif
     #if (defined __ARM_FP  && (((__ARM_FP & 0x2) != 0) && defined __ARM_NEON__))
+        have[CV_CPU_FP16] = have[CV_CPU_NEON_FP16] = true;
+    #endif
+    // system.cpp may be compiled w/o special -march=armv8...+dotprod, -march=armv8...+bf16 etc.,
+    // so we check for the features in any case, no mater what are the compile flags.
+    // We check the real hardware capabilities here.
+    int has_feat_dotprod = 0;
+    size_t has_feat_dotprod_size = sizeof(has_feat_dotprod);
+    sysctlbyname("hw.optional.arm.FEAT_DotProd", &has_feat_dotprod, &has_feat_dotprod_size, NULL, 0);
+    if (has_feat_dotprod) {
+        have[CV_CPU_NEON_DOTPROD] = true;
+    }
+    int has_feat_bf16 = 0;
+    size_t has_feat_bf16_size = sizeof(has_feat_bf16);
+    sysctlbyname("hw.optional.arm.FEAT_BF16", &has_feat_bf16, &has_feat_bf16_size, NULL, 0);
+    if (has_feat_bf16) {
+        have[CV_CPU_NEON_BF16] = true;
+    }
+    #elif (defined __clang__)
+    #if (defined __ARM_NEON__ || (defined __ARM_NEON && defined __aarch64__))
+        have[CV_CPU_NEON] = true;
+        #if (defined __ARM_FP  && ((__ARM_FP & 0x2) != 0))
         have[CV_CPU_FP16] = true;
+        #endif
     #endif
     #endif
     #if defined _ARM_ && (defined(_WIN32_WCE) && _WIN32_WCE >= 0x800)
+        have[CV_CPU_NEON] = true;
+    #endif
+    #if defined _M_ARM64
         have[CV_CPU_NEON] = true;
     #endif
     #ifdef __riscv_vector
@@ -630,7 +686,7 @@ struct HWFeatures
             }
         }
     #elif (defined __ppc64__ || defined __PPC64__) && defined __FreeBSD__
-        unsigned int hwcap = 0;
+        unsigned long hwcap = 0;
         elf_aux_info(AT_HWCAP, &hwcap, sizeof(hwcap));
         if (hwcap & PPC_FEATURE_HAS_VSX) {
             elf_aux_info(AT_HWCAP2, &hwcap, sizeof(hwcap));
@@ -652,6 +708,13 @@ struct HWFeatures
 
     #if defined __riscv && defined __riscv_vector
         have[CV_CPU_RVV] = true;
+    #endif
+
+    #if defined __loongarch64 && defined __linux__
+        int flag = (int)getauxval(AT_HWCAP);
+
+        have[CV_CPU_LSX] = (flag & LA_HWCAP_LSX) != 0;
+        have[CV_CPU_LASX] = (flag & LA_HWCAP_LASX) != 0;
     #endif
 
         bool skip_baseline_check = false;
@@ -840,7 +903,10 @@ bool useOptimized(void)
 
 int64 getTickCount(void)
 {
-#if defined _WIN32 || defined WINCE
+#if defined CV_CXX11
+    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    return (int64)now.time_since_epoch().count();
+#elif defined _WIN32 || defined WINCE
     LARGE_INTEGER counter;
     QueryPerformanceCounter( &counter );
     return (int64)counter.QuadPart;
@@ -859,7 +925,11 @@ int64 getTickCount(void)
 
 double getTickFrequency(void)
 {
-#if defined _WIN32 || defined WINCE
+#if defined CV_CXX11
+    using clock_period_t = std::chrono::steady_clock::duration::period;
+    double clock_freq = clock_period_t::den / clock_period_t::num;
+    return clock_freq;
+#elif defined _WIN32 || defined WINCE
     LARGE_INTEGER freq;
     QueryPerformanceFrequency(&freq);
     return (double)freq.QuadPart;
@@ -1372,7 +1442,7 @@ CV_IMPL const char* cvErrorStr( int status )
     case CV_OpenGlApiCallError :     return "OpenGL API call";
     };
 
-    sprintf(buf, "Unknown %s code %d", status >= 0 ? "status":"error", status);
+    snprintf(buf, sizeof(buf), "Unknown %s code %d", status >= 0 ? "status":"error", status);
     return buf;
 }
 
@@ -1482,11 +1552,7 @@ private:
 #endif
 #else // _WIN32
     pthread_key_t  tlsKey;
-#if OPENCV_WITH_THREAD_SANITIZER
     std::atomic<bool> disposed;
-#else
-    bool disposed;
-#endif
 #endif
 };
 
@@ -2532,7 +2598,7 @@ public:
         ippStatus = ippGetCpuFeatures(&cpuFeatures, NULL);
         if(ippStatus < 0)
         {
-            std::cerr << "ERROR: IPP cannot detect CPU features, IPP was disabled " << std::endl;
+            CV_LOG_ERROR(NULL, "ERROR: IPP cannot detect CPU features, IPP was disabled");
             useIPP = false;
             return;
         }
@@ -2570,7 +2636,7 @@ public:
 
             if(env == "disabled")
             {
-                std::cerr << "WARNING: IPP was disabled by OPENCV_IPP environment variable" << std::endl;
+                CV_LOG_WARNING(NULL, "WARNING: IPP was disabled by OPENCV_IPP environment variable");
                 useIPP = false;
             }
             else if(env == "sse42")
@@ -2584,7 +2650,7 @@ public:
 #endif
 #endif
             else
-                std::cerr << "ERROR: Improper value of OPENCV_IPP: " << env.c_str() << ". Correct values are: disabled, sse42, avx2, avx512 (Intel64 only)" << std::endl;
+                CV_LOG_ERROR(NULL, "ERROR: Improper value of OPENCV_IPP: " << env.c_str() << ". Correct values are: disabled, sse42, avx2, avx512 (Intel64 only)");
 
             // Trim unsupported features
             ippFeatures &= cpuFeatures;
@@ -2771,6 +2837,82 @@ void setUseIPP_NotExact(bool flag)
 }
 
 } // namespace ipp
+
+
+namespace details {
+
+#if OPENCV_IMPL_FP_HINTS_X86
+#ifndef _MM_DENORMALS_ZERO_ON  // requires pmmintrin.h (SSE3)
+#define _MM_DENORMALS_ZERO_ON 0x0040
+#endif
+#ifndef _MM_DENORMALS_ZERO_MASK  // requires pmmintrin.h (SSE3)
+#define _MM_DENORMALS_ZERO_MASK 0x0040
+#endif
+#endif
+
+void setFPDenormalsIgnoreHint(bool ignore, CV_OUT FPDenormalsModeState& state)
+{
+#if OPENCV_IMPL_FP_HINTS_X86
+    unsigned mask = _MM_FLUSH_ZERO_MASK;
+    unsigned value = ignore ? _MM_FLUSH_ZERO_ON : 0;
+    if (featuresEnabled.have[CPU_SSE3])
+    {
+        mask |= _MM_DENORMALS_ZERO_MASK;
+        value |= ignore ? _MM_DENORMALS_ZERO_ON : 0;
+    }
+    const unsigned old_flags = _mm_getcsr();
+    const unsigned old_value = old_flags & mask;
+    unsigned flags = (old_flags & ~mask) | value;
+    CV_LOG_DEBUG(NULL, "core: update FP mxcsr flags = " << cv::format("0x%08x", flags));
+    // save state
+    state.reserved[0] = (uint32_t)mask;
+    state.reserved[1] = (uint32_t)old_value;
+    _mm_setcsr(flags);
+#else
+    CV_UNUSED(ignore); CV_UNUSED(state);
+#endif
+}
+
+int saveFPDenormalsState(CV_OUT FPDenormalsModeState& state)
+{
+#if OPENCV_IMPL_FP_HINTS_X86
+    unsigned mask = _MM_FLUSH_ZERO_MASK;
+    if (featuresEnabled.have[CPU_SSE3])
+    {
+        mask |= _MM_DENORMALS_ZERO_MASK;
+    }
+    const unsigned old_flags = _mm_getcsr();
+    const unsigned old_value = old_flags & mask;
+    // save state
+    state.reserved[0] = (uint32_t)mask;
+    state.reserved[1] = (uint32_t)old_value;
+    return 2;
+#else
+    CV_UNUSED(state);
+    return 0;
+#endif
+}
+
+bool restoreFPDenormalsState(const FPDenormalsModeState& state)
+{
+#if OPENCV_IMPL_FP_HINTS_X86
+    const unsigned mask = (unsigned)state.reserved[0];
+    CV_DbgAssert(mask != 0); // invalid state (ensure that state is properly saved earlier)
+    const unsigned value = (unsigned)state.reserved[1];
+    CV_DbgCheck((int)value, value == (value & mask), "invalid SSE FP state");
+    const unsigned old_flags = _mm_getcsr();
+    unsigned flags = (old_flags & ~mask) | value;
+    CV_LOG_DEBUG(NULL, "core: restore FP mxcsr flags = " << cv::format("0x%08x", flags));
+    _mm_setcsr(flags);
+    return true;
+#else
+    CV_UNUSED(state);
+    return false;
+#endif
+}
+
+}  // namespace details
+
 
 } // namespace cv
 

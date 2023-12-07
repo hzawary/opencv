@@ -470,7 +470,11 @@ bool PAMDecoder::readHeader()
                     selected_fmt = IMWRITE_PAM_FORMAT_GRAYSCALE;
                 else if (m_channels == 3 && m_maxval < 256)
                     selected_fmt = IMWRITE_PAM_FORMAT_RGB;
+                else
+                    CV_Error(Error::StsError, "Can't determine selected_fmt (IMWRITE_PAM_FORMAT_NULL)");
             }
+            CV_CheckDepth(m_sampledepth, m_sampledepth == CV_8U || m_sampledepth == CV_16U, "");
+            CV_Check(m_channels, m_channels >= 1 && m_channels <= 4, "Unsupported number of channels");
             m_type = CV_MAKETYPE(m_sampledepth, m_channels);
             m_offset = m_strm.getPos();
 
@@ -566,6 +570,10 @@ bool PAMDecoder::readData(Mat& img)
                         m_strm.getBytes( src, src_stride );
                         FillColorRow1( data, src, m_width, palette );
                     }
+                }
+                else
+                {
+                    CV_Error(Error::StsError, cv::format("Unsupported value of target_channels: %d", target_channels));
                 }
             } else {
                 for (int y = 0; y < m_height; y++, data += imp_stride)
@@ -687,14 +695,14 @@ bool PAMEncoder::write( const Mat& img, const std::vector<int>& params )
 
     /* write header */
     tmp = 0;
-    tmp += sprintf( buffer, "P7\n");
-    tmp += sprintf( buffer + tmp, "WIDTH %d\n", width);
-    tmp += sprintf( buffer + tmp, "HEIGHT %d\n", height);
-    tmp += sprintf( buffer + tmp, "DEPTH %d\n", img.channels());
-    tmp += sprintf( buffer + tmp, "MAXVAL %d\n", (1 << img.elemSize1()*8) - 1);
+    tmp += snprintf( buffer, bufsize, "P7\n");
+    tmp += snprintf( buffer + tmp, bufsize - tmp, "WIDTH %d\n", width);
+    tmp += snprintf( buffer + tmp, bufsize - tmp, "HEIGHT %d\n", height);
+    tmp += snprintf( buffer + tmp, bufsize - tmp, "DEPTH %d\n", img.channels());
+    tmp += snprintf( buffer + tmp, bufsize - tmp, "MAXVAL %d\n", (1 << img.elemSize1()*8) - 1);
     if (fmt)
-        tmp += sprintf( buffer + tmp, "TUPLTYPE %s\n", fmt->name );
-    sprintf( buffer + tmp, "ENDHDR\n" );
+        tmp += snprintf( buffer + tmp, bufsize - tmp, "TUPLTYPE %s\n", fmt->name );
+    snprintf( buffer + tmp, bufsize - tmp, "ENDHDR\n" );
 
     strm.putBytes( buffer, (int)strlen(buffer) );
     /* write data */

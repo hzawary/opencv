@@ -2,11 +2,13 @@
 // It is subject to the license terms in the LICENSE file found in the top-level directory
 // of this distribution and at http://opencv.org/license.html.
 //
-// Copyright (C) 2018 Intel Corporation
+// Copyright (C) 2018-2022 Intel Corporation
 
 
 #include "../test_precomp.hpp"
 #include "../gapi_mock_kernels.hpp"
+
+#include <opencv2/gapi/core.hpp>
 
 namespace opencv_test
 {
@@ -25,7 +27,7 @@ class GMockExecutable final: public cv::gimpl::GIslandExecutable
         m_priv->m_reshape_counter++;
     }
     virtual void handleNewStream() override {  }
-    virtual void run(std::vector<InObj>&&, std::vector<OutObj>&&) { }
+    virtual void run(std::vector<InObj>&&, std::vector<OutObj>&&) override { }
     virtual bool allocatesOutputs() const override
     {
         return true;
@@ -53,7 +55,7 @@ public:
     GMockExecutable(bool can_reshape = true)
         : m_priv(new Priv{can_reshape, 0, 0})
     {
-    };
+    }
 
     void setReshape(bool can_reshape) { m_priv->m_can_reshape = can_reshape; }
 
@@ -90,7 +92,7 @@ class GMockBackendImpl final: public cv::gapi::GBackend::Priv
     }
 
 public:
-    GMockBackendImpl(const GMockExecutable& exec) : m_exec(exec) { };
+    GMockBackendImpl(const GMockExecutable& exec) : m_exec(exec) { }
     int getCompileCounter() const { return m_compile_counter; }
 };
 
@@ -122,8 +124,8 @@ GMockFunctor mock_kernel(const cv::gapi::GBackend& backend, Callable c)
                        };
 }
 
-void dummyFooImpl(const cv::Mat&, cv::Mat&)                 { };
-void dummyBarImpl(const cv::Mat&, const cv::Mat&, cv::Mat&) { };
+void dummyFooImpl(const cv::Mat&, cv::Mat&)                 { }
+void dummyBarImpl(const cv::Mat&, const cv::Mat&, cv::Mat&) { }
 
 struct GExecutorReshapeTest: public ::testing::Test
 {
@@ -153,7 +155,7 @@ struct GExecutorReshapeTest: public ::testing::Test
     std::shared_ptr<GMockBackendImpl> backend_impl2;
     cv::gapi::GBackend                backend2;
     cv::GKernelPackage                pkg;
-    cv::Mat                           in_mat1, in_mat2, out_mat;;
+    cv::Mat                           in_mat1, in_mat2, out_mat;
 };
 
 } // anonymous namespace
@@ -292,6 +294,28 @@ TEST_F(GExecutorReshapeTest, ReshapeCallAllocate)
     comp.apply(cv::gin(in_mat2), cv::gout(out_mat), cv::compile_args(pkg));
     EXPECT_EQ(2, island1.getAllocateCounter());
     EXPECT_EQ(1, island1.getReshapeCounter());
+}
+
+TEST_F(GExecutorReshapeTest, CPUBackendIsReshapable)
+{
+    comp = cv::GComputation([](){
+        cv::GMat in;
+        cv::GMat foo = I::Foo::on(in);
+        cv::GMat out = cv::gapi::bitwise_not(cv::gapi::bitwise_not(in));
+        return cv::GComputation(cv::GIn(in), cv::GOut(foo, out));
+    });
+    // NB: Initial state
+    EXPECT_EQ(0, island1.getReshapeCounter());
+
+    // NB: First compilation.
+    cv::Mat out_mat2;
+    comp.apply(cv::gin(in_mat1), cv::gout(out_mat, out_mat2), cv::compile_args(pkg));
+    EXPECT_EQ(0, island1.getReshapeCounter());
+
+    // NB: The entire graph is reshapable, so it won't be recompiled, but reshaped.
+    comp.apply(cv::gin(in_mat2), cv::gout(out_mat, out_mat2), cv::compile_args(pkg));
+    EXPECT_EQ(1, island1.getReshapeCounter());
+    EXPECT_EQ(0, cvtest::norm(out_mat2, in_mat2, NORM_INF));
 }
 
 // FIXME: Add explicit tests on GMat/GScalar/GArray<T> being connectors

@@ -9,6 +9,8 @@
 
 #include "opencv2/core/hal/hal.hpp"
 #include "opencv2/core/hal/intrin.hpp"
+#include "../op_timvx.hpp"
+#include "../ie_ngraph.hpp"
 #include <iostream>
 #include <numeric>
 
@@ -17,7 +19,7 @@ namespace cv
 namespace dnn
 {
 
-#if CV_SIMD
+#if CV_SIMD128
 static inline void v_expand_mul_add(const v_int8x16& a, const v_int8x16& b,
                                     v_int32x4& out0, v_int32x4& out1, v_int32x4& out2, v_int32x4& out3)
 {
@@ -27,10 +29,10 @@ static inline void v_expand_mul_add(const v_int8x16& a, const v_int8x16& b,
 
     v_int32x4 t0, t1;
     v_mul_expand(a0, b0, t0, t1);
-    out0 += t0; out1 += t1;
+    out0 = v_add(out0, t0); out1 = v_add(out1, t1);
 
     v_mul_expand(a1, b1, t0, t1);
-    out2 += t0; out3 += t1;
+    out2 = v_add(out2, t0); out3 = v_add(out3, t1);
 }
 #endif
 
@@ -40,15 +42,17 @@ public:
     BaseConvolutionLayerInt8Impl(const LayerParams &params)
     {
         setParamsFrom(params);
-        getConvolutionKernelParams(params, kernel_size, pads_begin, pads_end, strides, dilations, padMode, adjust_pads);
+        getConvolutionKernelParams(params, kernel_size, pads_begin, pads_end, strides, dilations, padMode, adjust_pads, useWinograd);
 
         numOutput = params.get<int>("num_output");
         int ngroups = params.get<int>("group", 1);
         CV_Assert(numOutput % ngroups == 0);
 
+        input_sc = params.get<float>("input_scale");
         input_zp = params.get<int>("input_zeropoint");
         output_zp = params.get<int>("zeropoints");
         output_sc = params.get<float>("scales");
+        per_channel = params.get<bool>("per_channel", true);
 
         if (kernel_size.size() == 2) {
             kernel = Size(kernel_size[1], kernel_size[0]);
@@ -84,11 +88,11 @@ public:
         CV_Assert(inputs[0].dims == outputs[0].dims);
         if (weightShape.dims() == 3)
         {
-            kernel_size.assign(1, kernel_size[0]);
-            strides.assign(1, strides[0]);
-            dilations.assign(1, dilations[0]);
-            pads_begin.assign(1, pads_begin[0]);
-            pads_end.assign(1, pads_end[0]);
+            kernel_size.resize(1, kernel_size[0]);
+            strides.resize(1, strides[0]);
+            dilations.resize(1, dilations[0]);
+            pads_begin.resize(1, pads_begin[0]);
+            pads_end.resize(1, pads_end[0]);
         }
         CV_Assert(weightShape.dims() == kernel_size.size() + 2);
         for (int i = 0; i < kernel_size.size(); i++) {
@@ -181,8 +185,19 @@ public:
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
         size_t ksize = kernel_size.size();
+
+#ifdef HAVE_TIMVX
+        if (backendId == DNN_BACKEND_TIMVX)
+        {
+            /* only Conv1d and Conv2d supported. */
+            if (ksize == 2 || ksize == 1)
+                return true;
+            return false;
+        }
+#endif
         // Only default backend and Conv1D/Conv2D/Conv3D are supported
-        return backendId == DNN_BACKEND_OPENCV && ksize >= 1 && ksize <= 3;
+        return (backendId == DNN_BACKEND_OPENCV && ksize >= 1 && ksize <= 3) ||
+               backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH;
     }
 
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
@@ -261,6 +276,11 @@ public:
 
     bool setActivation(const Ptr<ActivationLayer>& layer) CV_OVERRIDE
     {
+        // TODO! add activation in convolution.
+#ifdef HAVE_TIMVX
+        if (preferableTarget == DNN_TARGET_NPU)
+            return false;
+#endif
         Ptr<ActivationLayerInt8> activ_int8 = layer.dynamicCast<ActivationLayerInt8>();
         if (!activ_int8.empty())
         {
@@ -300,6 +320,369 @@ public:
         outputMultiplier[outCn] = outputMultiplier[outCn+1] = outputMultiplier[outCn-1];
     }
 
+    virtual Ptr<BackendNode> initTimVX(void* timVXInfo_,
+                                       const std::vector<Ptr<BackendWrapper> > &inputsWrapper,
+                                       const std::vector<Ptr<BackendWrapper> > &outputsWrapper,
+                                       bool isLast) CV_OVERRIDE
+    {
+#ifdef HAVE_TIMVX
+        /* TODO :support GroupConv;
+        Ref:
+        https://github.com/VeriSilicon/TIM-VX/blob/main/docs/Operators.md#conv2d
+        Link Reference: https://github.com/VeriSilicon/TIM-VX/blob/main/src/tim/vx/ops/conv1d_test.cc
+        */
+
+        // tvGraph Initialization.
+        auto timVxInfo = reinterpret_cast<TimVXInfo *>(timVXInfo_);
+        CV_Assert(timVxInfo);
+        Ptr<TimVXGraph> tvGraph = timVxInfo->getGraph();
+        CV_Assert(tvGraph);
+        Ptr<tim::vx::Graph> graph = tvGraph->graph;
+
+        Mat tvWeightMat = blobs[0];
+
+        std::vector<int> tvBiasVec;
+        tvBiasVec.assign(biasvec.begin(), biasvec.end() - 2);
+        Mat tvBiasMat(tvBiasVec);
+
+        for (int i = 0; i < numOutput; i++)
+        {
+            tvBiasVec[i] += input_zp * (cv::sum(blobs[0].row(i))[0]);
+        }
+
+        // Padding Type
+        tim::vx::PadType tvPadType;
+
+        if (padMode.empty())
+        {
+            tvPadType = tim::vx::PadType::AUTO; // TODO! check the padding type.
+        }
+        else if(padMode == "VALID")
+        {
+            tvPadType = tim::vx::PadType::VALID;
+        }
+        else if (padMode == "SAME")
+        {
+            tvPadType = tim::vx::PadType::SAME;
+        }
+        else
+        {
+            CV_Error(Error::StsError, "Unsupported padding mode in TimVXBackend!");
+        }
+
+        size_t ksize = kernel_size.size();
+
+        std::vector<int> inputsIndex;
+        std::vector<int> outputsIndex;
+
+        CV_Assert(inputsWrapper.size() == 1);
+        CV_Assert(ksize == 2 || ksize == 1);
+
+        std::vector<float> weight_scs, bias_scs;
+        std::vector<int32_t> weight_zps, bias_zps;
+
+        weight_scs.resize(numOutput);
+        bias_scs.resize(numOutput);
+
+        for (int i = 0; i < numOutput; i++)
+        {
+            bias_scs[i] = outputMultiplier[i] * output_sc;
+            weight_scs[i] = bias_scs[i] / input_sc;
+        }
+
+        weight_zps.assign(numOutput, 0);
+        bias_zps.assign(numOutput, 0);
+
+        bool tvSymmetric;
+        tvSymmetric = getQuantType(weight_scs, numOutput);
+
+        // input Tensor
+        auto inputWrapper = inputsWrapper[0].dynamicCast<TimVXBackendWrapper>();
+        int input_index = -1, weight_index = -1, bias_index = -1, output_index = -1;
+
+        if (inputWrapper->isTensor())
+        {
+            input_index = tvGraph->getTensorIndex(inputWrapper->getTensor());
+            if (input_index == -1)
+            {
+                // Copy To New inputWrapper
+                Mat tmp = inputWrapper->getMat();
+                inputWrapper = Ptr<TimVXBackendWrapper>(new TimVXBackendWrapper(tmp));
+            }
+        }
+
+        if (!inputWrapper->isTensor())
+        {
+            Ptr<tim::vx::Quantization> tvInputQuant = Ptr<tim::vx::Quantization>(
+                    new tim::vx::Quantization(tim::vx::QuantType::ASYMMETRIC, input_sc, input_zp));
+            inputWrapper->createTensor(graph, tim::vx::TensorAttribute::INPUT, tvInputQuant);
+            input_index = tvGraph->addWrapper(inputWrapper);
+        }
+        inputsIndex.push_back(input_index);
+
+        // weight Tensor
+        auto tvConvWeightShape = shape(tvWeightMat);
+        Mat tvInputMat = inputWrapper->getMat();
+        // calculate group value.
+        int group = tvInputMat.size[1] / tvWeightMat.size[1];
+
+        // TODO! It will be supported in future.
+        if (tvSymmetric && tvWeightMat.total() == tvConvWeightShape[0])
+            return Ptr<TimVXBackendNode>();
+        // Reverse weight shape From OpenCV NCHW to TimVX WHCN.
+        std::reverse(tvConvWeightShape.begin(), tvConvWeightShape.end());
+
+        Ptr<TimVXBackendWrapper> weightWrapper = Ptr<TimVXBackendWrapper>(new TimVXBackendWrapper(tvWeightMat));
+        Ptr<tim::vx::Quantization> weightQuant;
+
+        if (tvSymmetric)
+        {
+            int wtChanneldim = tvWeightMat.dims - 1;
+            weightQuant = Ptr<tim::vx::Quantization>(
+                    new tim::vx::Quantization(tim::vx::QuantType::SYMMETRIC_PER_CHANNEL, wtChanneldim,
+                                              weight_scs, weight_zps));
+        }
+        else
+        {
+            weightQuant = Ptr<tim::vx::Quantization>(
+                    new tim::vx::Quantization(tim::vx::QuantType::ASYMMETRIC, weight_scs[0], 0));
+        }
+        weightWrapper->createTensor(graph,tim::vx::TensorAttribute::CONSTANT, weightQuant);
+
+        weight_index = tvGraph->addWrapper(weightWrapper);
+        inputsIndex.push_back(weight_index);
+
+        // Bias Tensor
+        Ptr<TimVXBackendWrapper> biasWrapper = Ptr<TimVXBackendWrapper>(new TimVXBackendWrapper(tvBiasMat));
+        Ptr<tim::vx::Quantization> biasQuant;
+
+        if (tvSymmetric)
+        {
+            biasQuant = Ptr<tim::vx::Quantization>(
+                    new tim::vx::Quantization(tim::vx::QuantType::SYMMETRIC_PER_CHANNEL, 0,
+                                              bias_scs, bias_zps));
+        }
+        else
+        {
+            biasQuant = Ptr<tim::vx::Quantization>(
+                    new tim::vx::Quantization(tim::vx::QuantType::ASYMMETRIC, weight_scs[0] * input_sc, 0));
+        }
+
+        biasWrapper->createTensor(graph, tim::vx::TensorAttribute::CONSTANT, biasQuant);
+        bias_index = tvGraph->addWrapper(biasWrapper);
+        inputsIndex.push_back(bias_index);
+        // Output tensor
+        CV_Assert(outputsWrapper.size() == 1);
+        auto outputWrapper = outputsWrapper[0].dynamicCast<TimVXBackendWrapper>();
+        Ptr<tim::vx::Quantization> outputQuant = Ptr<tim::vx::Quantization>(
+                new tim::vx::Quantization(tim::vx::QuantType::ASYMMETRIC, output_sc, output_zp));
+
+        if (isLast)
+        {
+            // From OpenCV NCHW, to TimVX WHCN
+            auto shapeType = getShapeTypeFromMat(outputWrapper->getMat());
+
+            // For Graph Output tensor, we need to set tensor shape before createTensor().
+            outputWrapper->setTensorShape(shapeType);
+            outputWrapper->createTensor(graph, tim::vx::TensorAttribute::OUTPUT, outputQuant);
+        }
+        else
+        {
+            outputWrapper->createTensor(graph, tim::vx::TensorAttribute::TRANSIENT, outputQuant);
+        }
+
+        output_index = tvGraph->addWrapper(outputWrapper);
+        outputsIndex.push_back(output_index);
+
+        std::shared_ptr<tim::vx::Operation> tvConv;
+
+        if (ksize == 2)  // for conv2d
+        {
+            int multiplier = 0;
+            if(group == tvConvWeightShape[3] && group != 1)
+                multiplier = 1;
+            if (group == 1 || (group == tvConvWeightShape[3] && group != 1)) // Conv2D || DeConv2D
+            {
+                if (tvPadType == tim::vx::PadType::AUTO) {
+                    tvConv = graph->CreateOperation<tim::vx::ops::Conv2d>(
+                            tvConvWeightShape[3], tvPadType,
+                            std::array<uint32_t, 2>({(uint32_t) kernel_size[1], (uint32_t) kernel_size[0]}),
+                            std::array<uint32_t, 2>({(uint32_t) strides[1], (uint32_t) strides[0]}),
+                            std::array<uint32_t, 2>({(uint32_t) dilations[1], (uint32_t) dilations[0]}),
+                            std::array<uint32_t, 4>({(uint32_t) pads_begin[1], (uint32_t) pads_end[1],
+                                                     (uint32_t) pads_begin[0], (uint32_t) pads_end[0]}),
+                            multiplier);
+                }
+                else
+                {
+                    tvConv = graph->CreateOperation<tim::vx::ops::Conv2d>(
+                            tvPadType,
+                            std::array<uint32_t, 2>({(uint32_t) strides[1], (uint32_t) strides[0]}),
+                            std::array<uint32_t, 2>({(uint32_t) dilations[1], (uint32_t) dilations[0]}),
+                            multiplier);
+                }
+            }
+            else
+            {
+                // GroupedConv2d
+                if (tvPadType == tim::vx::PadType::AUTO)
+                {
+                    tvConv = graph->CreateOperation<tim::vx::ops::GroupedConv2d>(
+                            std::array<uint32_t, 4>({(uint32_t) pads_begin[1], (uint32_t) pads_end[1],
+                                                     (uint32_t) pads_begin[0], (uint32_t) pads_end[0]}),
+                            std::array<uint32_t, 2>({(uint32_t)strides[1], (uint32_t)strides[0]}),
+                            std::array<uint32_t, 2>({(uint32_t)dilations[1], (uint32_t)dilations[0]}),
+                            group);
+                }
+                else
+                {
+                    tvConv = graph->CreateOperation<tim::vx::ops::GroupedConv2d>(
+                            tvPadType,
+                            std::array<uint32_t, 2>({(uint32_t)strides[1], (uint32_t)strides[0]}),
+                            std::array<uint32_t, 2>({(uint32_t)dilations[1], (uint32_t)dilations[0]}),
+                            group);
+                }
+            }
+        }
+        else
+        {
+            // for Conv1d
+            if (group != 1)
+                CV_Error( CV_StsNotImplemented, " Grouped Conv1d or Depth-Wise Conv1d are not supported by "
+                                                "TimVX Backend. Please try OpenCV Backend.");
+            tvConv = graph->CreateOperation<tim::vx::ops::Conv1d>(
+                    tvConvWeightShape[2], tvPadType, (uint32_t)kernel_size[0],
+                    (uint32_t)strides[0],(uint32_t)dilations[0],
+                    std::array<uint32_t, 2>({(uint32_t)pads_begin[0], (uint32_t)pads_end[0]}));
+        }
+        // Create TimVXBackendNode
+        Ptr<TimVXBackendNode> tvBackendNode = new TimVXBackendNode(tvGraph, tvConv, inputsIndex, outputsIndex);
+
+        return tvBackendNode;
+#endif  // HAVE_TIMVX
+        return Ptr<BackendNode>();
+    }
+
+#ifdef HAVE_DNN_NGRAPH
+    virtual Ptr<BackendNode> initNgraph(const std::vector<Ptr<BackendWrapper> > &inputs,
+                                        const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
+    {
+        CV_Assert(!blobs.empty());
+        CV_Assert_N(inputs.size() >= 1, nodes.size() >= 1);
+        CV_CheckTypeEQ(weightsMat.type(), CV_8S, "");
+        auto ieInpNode = nodes[0].dynamicCast<InfEngineNgraphNode>()->node;
+        std::vector<size_t> dims = ieInpNode.get_shape();
+        CV_Check(dims.size(), dims.size() >= 3 && dims.size() <= 5, "");
+        CV_Assert(ieInpNode.get_element_type() == ngraph::element::f32);
+        ngraph::Output<ngraph::Node> ieWeights;
+        if (nodes.size() > 1)
+            ieWeights = nodes[1].dynamicCast<InfEngineNgraphNode>()->node;
+        const int inpCn = dims[1];
+        const int inpGroupCn = nodes.size() > 1 ? ieWeights.get_shape()[1] : blobs[0].size[1];
+        const int group = inpCn / inpGroupCn;
+
+        std::vector<size_t> kernel_shape;
+        if (group != 1)
+        {
+            kernel_shape.push_back(group);
+        }
+        kernel_shape.push_back(numOutput / group);
+        kernel_shape.push_back(inpCn / group);
+        std::copy(kernel_size.begin(), kernel_size.end(), back_inserter(kernel_shape));
+
+        if (nodes.size() == 1)
+        {
+            ieWeights = std::make_shared<ngraph::op::Constant>(ngraph::element::i8, kernel_shape, blobs[0].data);
+        }
+        else
+        {
+            auto shape = std::make_shared<ngraph::op::Constant>(ngraph::element::i64,
+                             ngraph::Shape{kernel_shape.size()}, std::vector<int64_t>(kernel_shape.begin(), kernel_shape.end()));
+            ieWeights  = std::make_shared<ngraph::op::v1::Reshape>(ieWeights, shape, true);
+        }
+
+        ngraph::op::PadType pad_type = ngraph::op::PadType::EXPLICIT;
+        if (!padMode.empty())
+            pad_type = padMode == "VALID" ? ngraph::op::PadType::VALID : ngraph::op::PadType::SAME_UPPER;
+
+        ieInpNode = ngraphDequantize(ieInpNode, input_sc, input_zp);
+
+        const float low = -128, high = 127;
+        std::vector<float> inpLows(numOutput, low);
+        std::vector<float> inpHighs(numOutput, high);
+        std::vector<float> outLows(numOutput);
+        std::vector<float> outHighs(numOutput);
+        std::vector<size_t> quantShape(kernel_shape.size(), 1);
+        if (group != 1)
+        {
+            quantShape[0] = group;
+            quantShape[1] = numOutput / group;
+        }
+        else
+        {
+            quantShape[0] = numOutput;
+        }
+
+        for (int i = 0; i < numOutput; ++i) {
+            outLows[i] = low * outputMultiplier[i] * output_sc / input_sc;
+            outHighs[i] = high * outputMultiplier[i] * output_sc / input_sc;
+        }
+        ieWeights = std::make_shared<ngraph::op::Convert>(ieWeights, ngraph::element::f32);
+        ieWeights = std::make_shared<ngraph::op::FakeQuantize>(ieWeights,
+            std::make_shared<ngraph::op::Constant>(ngraph::element::f32, quantShape, inpLows.data()),
+            std::make_shared<ngraph::op::Constant>(ngraph::element::f32, quantShape, inpHighs.data()),
+            std::make_shared<ngraph::op::Constant>(ngraph::element::f32, quantShape, outLows.data()),
+            std::make_shared<ngraph::op::Constant>(ngraph::element::f32, quantShape, outHighs.data()),
+            256 // levels
+        );
+
+        ngraph::Output<ngraph::Node> conv_node;
+        if (group != 1) {
+            conv_node = std::make_shared<ngraph::op::v1::GroupConvolution>(
+                                ieInpNode, ieWeights,
+                                ngraph::Strides(strides),
+                                ngraph::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_begin.begin(), pads_begin.end())),
+                                ngraph::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_end.begin(),   pads_end.end())),
+                                ngraph::Strides(dilations),
+                                pad_type);
+        } else {
+            conv_node = std::make_shared<ngraph::op::v1::Convolution>(
+                                ieInpNode, ieWeights,
+                                ngraph::Strides(strides),
+                                ngraph::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_begin.begin(), pads_begin.end())),
+                                ngraph::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_end.begin(), pads_end.end())),
+                                ngraph::Strides(dilations),
+                                pad_type);
+        }
+
+        std::vector<size_t> shape(conv_node.get_shape().size(), 1);
+        shape[1] = conv_node.get_shape()[1];
+        if (biasvec.size() || nodes.size() == 3)
+        {
+            std::shared_ptr<ngraph::Node> bias;
+            if (nodes.size() == 3)
+            {
+                auto bias_shape = std::make_shared<ngraph::op::Constant>(ngraph::element::i64,
+                                    ngraph::Shape{shape.size()}, std::vector<int64_t>(shape.begin(), shape.end()));
+                bias = std::make_shared<ngraph::op::v1::Reshape>(nodes[2].dynamicCast<InfEngineNgraphNode>()->node, bias_shape, true);
+            }
+            else
+            {
+                std::vector<float> ovBias(numOutput);
+                for (int i = 0; i < numOutput; ++i) {
+                    ovBias[i] = (biasvec[i] + input_zp * cv::sum(blobs[0].row(i))[0]) * outputMultiplier[i] * output_sc;
+                }
+                bias = std::make_shared<ngraph::op::Constant>(ngraph::element::f32, ngraph::Shape(shape), ovBias.data());
+            }
+            conv_node = std::make_shared<ngraph::op::v1::Add>(conv_node, bias, ngraph::op::AutoBroadcastType::NUMPY);
+        }
+
+        conv_node = ngraphQuantize(conv_node, output_sc, output_zp);
+
+        return new InfEngineNgraphNode(conv_node);
+    }
+#endif  // HAVE_DNN_NGRAPH
+
     class ParallelConv : public cv::ParallelLoopBody
     {
     public:
@@ -318,13 +701,14 @@ public:
         bool is1x1_;
         bool useAVX2;
         bool useAVX512;
+        bool useLASX;
         int blk_size_cn;
         int inpZp, outZp;
         const std::vector<float>* multiplier;
 
         ParallelConv()
             : input_(0), weights_(0), output_(0), ngroups_(0), nstripes_(0),
-              biasvec_(0), activLUT_(0), activ_(0), is1x1_(false), useAVX2(false), useAVX512(false)
+              biasvec_(0), activLUT_(0), activ_(0), is1x1_(false), useAVX2(false), useAVX512(false), useLASX(false)
             , blk_size_cn(0), inpZp(0), outZp(0), multiplier(0)
         {}
 
@@ -379,6 +763,8 @@ public:
 
             p.useAVX2   = checkHardwareSupport(CPU_AVX2) && isConv2D;
             p.useAVX512 = CV_CPU_HAS_SUPPORT_AVX512_SKX  && isConv2D;
+
+            p.useLASX   = checkHardwareSupport(CPU_LASX) && isConv2D;
 
             int kernel_d = isConv3D? kernel_size[0] : 1;
             int kernel_h = isConv1D? 1 : kernel_size[kernel_size.size() - 2];
@@ -577,6 +963,13 @@ public:
                                     biasptr, multptr, inptr_, height, width, outptr_, out_d, outH, outW, inpZp, outZp);
                             else
                         #endif
+                        #if CV_TRY_LASX
+                            if(useLASX)
+                                opt_LASX::fastDepthwiseConv(wptr, kernel_h, kernel_w,
+                                    stride_h, stride_w, dilation_h, dilation_w, pad_t, pad_l,
+                                    biasptr, multptr, inptr_, height, width, outptr_, out_d, outH, outW, inpZp, outZp);
+                            else
+                        #endif
                             {
                                 const int8_t w00_ = wptr[0], w01_ = wptr[1], w02_ = wptr[2],
                                              w10 = wptr[3], w11 = wptr[4], w12 = wptr[5],
@@ -622,7 +1015,7 @@ public:
                                         outptr[0] = std::min(std::max(out1, -128), 127);
                                         out_j = 1;
                                     }
-                                #if CV_SIMD
+                                #if CV_SIMD128
                                     if( stride_w == 1 )
                                     {
                                         const int out_delta = 16;
@@ -662,10 +1055,10 @@ public:
                                             v_expand_mul_add(v21, vw21, vout0, vout1, vout2, vout3);
                                             v_expand_mul_add(v22, vw22, vout0, vout1, vout2, vout3);
 
-                                            vout0 = voutzp + v_round(v_cvt_f32(vout0)*vmult);
-                                            vout1 = voutzp + v_round(v_cvt_f32(vout1)*vmult);
-                                            vout2 = voutzp + v_round(v_cvt_f32(vout2)*vmult);
-                                            vout3 = voutzp + v_round(v_cvt_f32(vout3)*vmult);
+                                            vout0 = v_add(voutzp, v_round(v_mul(v_cvt_f32(vout0), vmult)));
+                                            vout1 = v_add(voutzp, v_round(v_mul(v_cvt_f32(vout1), vmult)));
+                                            vout2 = v_add(voutzp, v_round(v_mul(v_cvt_f32(vout2), vmult)));
+                                            vout3 = v_add(voutzp, v_round(v_mul(v_cvt_f32(vout3), vmult)));
 
                                             vout0 = v_min(v_max(vout0, outmin), outmax);
                                             vout1 = v_min(v_max(vout1, outmin), outmax);
@@ -950,6 +1343,12 @@ public:
                                           outShape, bsz, vsz, vsz_a, outZp, multptr, cn0 == 0, cn1 == inpCn);
                         else
                     #endif
+                    #if CV_TRY_LASX
+                        if(useLASX)
+                            opt_LASX::fastConv(wptr, wstep, biasptr, rowbuf0, data_out0 + ofs0,
+                                          outShape, bsz, vsz, vsz_a, outZp, multptr, cn0 == 0, cn1 == inpCn);
+                        else
+                    #endif
                         for( int i = 0; i < outCn; i += 2 )
                         {
                             const int8_t* wptr0 = wptr + i*wstep;
@@ -1009,12 +1408,12 @@ public:
                                     vs12 = v_dotprod_expand_fast(w1, r2, vs12);
                                     vs13 = v_dotprod_expand_fast(w1, r3, vs13);
                                 }
-                                s0 += v_int32x4(v_reduce_sum(vs00), v_reduce_sum(vs01), v_reduce_sum(vs02), v_reduce_sum(vs03));
-                                s1 += v_int32x4(v_reduce_sum(vs10), v_reduce_sum(vs11), v_reduce_sum(vs12), v_reduce_sum(vs13));
+                                s0 = v_add(s0, v_int32x4(v_reduce_sum(vs00), v_reduce_sum(vs01), v_reduce_sum(vs02), v_reduce_sum(vs03)));
+                                s1 = v_add(s1, v_int32x4(v_reduce_sum(vs10), v_reduce_sum(vs11), v_reduce_sum(vs12), v_reduce_sum(vs13)));
                                 if( cn1 == inpCn )
                                 {
-                                    s0 = voutzp + v_round(v_cvt_f32(s0)*vmult0);
-                                    s1 = voutzp + v_round(v_cvt_f32(s1)*vmult1);
+                                    s0 = v_add(voutzp, v_round(v_mul(v_cvt_f32(s0), vmult0)));
+                                    s1 = v_add(voutzp, v_round(v_mul(v_cvt_f32(s1), vmult1)));
 
                                     s0 = v_min(v_max(s0, outmin), outmax);
                                     s1 = v_min(v_max(s1, outmin), outmax);

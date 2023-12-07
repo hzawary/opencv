@@ -115,6 +115,9 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
     void selu(const csl::Stream& stream, csl::Span<T> output, csl::View<T> input, T alpha, T gamma);
 
     template <class T>
+    void gelu(const csl::Stream& stream, csl::Span<T> output, csl::View<T> input);
+
+    template <class T>
     void thresholdedrelu(const csl::Stream& stream, csl::Span<T> output, csl::View<T> input, T alpha);
 
     template <class T>
@@ -123,6 +126,14 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
     template <class T>
     void exp(const csl::Stream& stream, csl::Span<T> output, csl::View<T> input, T normScale, T normShift);
 
+    template <class T>
+    void sign(const csl::Stream& stream, csl::Span<T> output, csl::View<T> input);
+
+    template <class T>
+    void shrink(const csl::Stream& stream, csl::Span<T> output, csl::View<T> input, T bias, T lambd);
+
+    template <class T>
+    void reciprocal(const csl::Stream& stream, csl::Span<T> output, csl::View<T> input);
 }}}} /* namespace cv::dnn::cuda4dnn::kernels */
 
 #endif /* OPENCV_DNN_SRC_CUDA4DNN_KERNELS_ACTIVATIONS_HPP */

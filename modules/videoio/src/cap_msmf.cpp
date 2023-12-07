@@ -29,6 +29,7 @@
 #ifdef HAVE_MSMF_DXVA
 #include <d3d11.h>
 #include <d3d11_4.h>
+#include <locale>
 #endif
 #include <new>
 #include <map>
@@ -347,6 +348,12 @@ struct MediaType
         }
         return false;
     }
+    bool VideoIsAvailable() const
+    {
+        return ((subType == MFVideoFormat_RGB32) ||
+            (subType == MFVideoFormat_RGB24) ||
+            (subType == MFVideoFormat_YUY2));
+    }
 };
 
 void printFormat(std::ostream& out, const GUID& fmt)
@@ -536,7 +543,7 @@ private:
     // Destructor is private. Caller should call Release.
     virtual ~SourceReaderCB()
     {
-        CV_LOG_WARNING(NULL, "terminating async callback");
+        CV_LOG_INFO(NULL, "terminating async callback");
     }
 
 public:
@@ -627,7 +634,7 @@ public:
         {
             if (i->second.majorType == MFMediaType_Video)
             {
-                if (best.second.isEmpty() || i->second.VideoIsBetterThan(best.second, newType))
+                if (best.second.isEmpty() || (i->second.VideoIsBetterThan(best.second, newType) && i->second.VideoIsAvailable()))
                 {
                     best = *i;
                 }
@@ -1152,7 +1159,12 @@ bool CvCapture_MSMF::configureVideoOutput(MediaType newType, cv::uint32_t outFor
     {
         initStream(dwVideoStreamIndex, nativeFormat);
     }
-    return initStream(dwVideoStreamIndex, newFormat);
+    if (!initStream(dwVideoStreamIndex, newFormat))
+    {
+        return false;
+    }
+    outputVideoFormat = outFormat;
+    return true;
 }
 
 bool CvCapture_MSMF::configureOutput()
@@ -2462,6 +2474,12 @@ const GUID CvVideoWriter_MSMF::FourCC2GUID(int fourcc)
 #endif
         case CV_FOURCC_MACRO('H', '2', '6', '4'):
                 return MFVideoFormat_H264; break;
+#if defined(NTDDI_WIN10)
+        case CV_FOURCC_MACRO('H', '2', '6', '5'):
+                return MFVideoFormat_H265;  break;
+        case CV_FOURCC_MACRO('H', 'E', 'V', 'C'):
+                return MFVideoFormat_HEVC;  break;
+#endif
         case CV_FOURCC_MACRO('M', '4', 'S', '2'):
                 return MFVideoFormat_M4S2; break;
         case CV_FOURCC_MACRO('M', 'J', 'P', 'G'):
@@ -2706,8 +2724,6 @@ CvResult CV_API_CALL cv_capture_open_with_params(
     if (!handle)
         return CV_ERROR_FAIL;
     *handle = NULL;
-    if (!filename)
-        return CV_ERROR_FAIL;
     CaptureT* cap = 0;
     try
     {

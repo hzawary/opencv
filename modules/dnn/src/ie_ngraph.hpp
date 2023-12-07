@@ -37,7 +37,7 @@ public:
     InfEngineNgraphNet(detail::NetImplBase& netImpl);
     InfEngineNgraphNet(detail::NetImplBase& netImpl, InferenceEngine::CNNNetwork& net);
 
-    void addOutput(const std::string& name);
+    void addOutput(const Ptr<InfEngineNgraphNode>& node);
 
     bool isInitialized();
     void init(Target targetId);
@@ -47,29 +47,24 @@ public:
     void initPlugin(InferenceEngine::CNNNetwork& net);
     ngraph::ParameterVector setInputs(const std::vector<cv::Mat>& inputs, const std::vector<std::string>& names);
 
-    void setUnconnectedNodes(Ptr<InfEngineNgraphNode>& node);
     void addBlobs(const std::vector<cv::Ptr<BackendWrapper> >& ptrs);
 
     void createNet(Target targetId);
-    void setNodePtr(std::shared_ptr<ngraph::Node>* ptr);
 
     void reset();
 
 //private:
     detail::NetImplBase& netImpl_;
 
-    void release();
-    int getNumComponents();
-    void dfs(std::shared_ptr<ngraph::Node>& node, std::vector<std::shared_ptr<ngraph::Node>>& comp,
-             std::unordered_map<std::string, bool>& used);
-
     ngraph::ParameterVector inputs_vec;
     std::shared_ptr<ngraph::Function> ngraph_function;
-    std::vector<std::vector<std::shared_ptr<ngraph::Node>>> components;
-    std::unordered_map<std::string, std::shared_ptr<ngraph::Node>* > all_nodes;
 
     InferenceEngine::ExecutableNetwork netExec;
+#if INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2022_1)
+    std::map<std::string, ov::Tensor> allBlobs;
+#else
     InferenceEngine::BlobMap allBlobs;
+#endif
     std::string device_name;
     bool isInit = false;
 
@@ -88,10 +83,7 @@ public:
 
     InferenceEngine::CNNNetwork cnn;
     bool hasNetOwner;
-    std::vector<std::string> requestedOutputs;
-    std::unordered_set<std::shared_ptr<ngraph::Node>> unconnectedNodes;
-
-    std::map<std::string, InferenceEngine::TensorDesc> outputsDesc;
+    std::unordered_map<std::string, InfEngineNgraphNode*> requestedOutputs;
 };
 
 class InfEngineNgraphNode : public BackendNode
@@ -101,13 +93,13 @@ public:
                         std::vector<Mat*>& inputs, std::vector<Mat>& outputs,
                         std::vector<Mat>& internals);
 
-    InfEngineNgraphNode(std::shared_ptr<ngraph::Node>&& _node);
-    InfEngineNgraphNode(std::shared_ptr<ngraph::Node>& _node);
+    InfEngineNgraphNode(ngraph::Output<ngraph::Node>&& _node);
+    InfEngineNgraphNode(const ngraph::Output<ngraph::Node>& _node);
 
     void setName(const std::string& name);
 
     // Inference Engine network object that allows to obtain the outputs of this layer.
-    std::shared_ptr<ngraph::Node> node;
+    ngraph::Output<ngraph::Node> node;
     Ptr<InfEngineNgraphNet> net;
     Ptr<dnn::Layer> cvLayer;
 };
@@ -125,16 +117,14 @@ public:
     virtual void setHostDirty() CV_OVERRIDE;
 
     Mat* host;
-    InferenceEngine::DataPtr dataPtr;
+    std::string name;
+#if INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2022_1)
+    ov::Tensor blob;
+#else
     InferenceEngine::Blob::Ptr blob;
+#endif
     AsyncArray futureMat;
 };
-
-InferenceEngine::DataPtr ngraphDataNode(const Ptr<BackendWrapper>& ptr);
-InferenceEngine::DataPtr ngraphDataOutputNode(
-        const Ptr<BackendWrapper>& ptr,
-        const InferenceEngine::TensorDesc& description,
-        const std::string name);
 
 // This is a fake class to run networks from Model Optimizer. Objects of that
 // class simulate responses of layers are imported by OpenCV and supported by
@@ -158,10 +148,10 @@ private:
     InferenceEngine::CNNNetwork t_net;
 };
 
-#endif  // HAVE_DNN_NGRAPH
+ngraph::Output<ngraph::Node> ngraphQuantize(ngraph::Output<ngraph::Node> input, float output_sc, float output_zp);
+ngraph::Output<ngraph::Node> ngraphDequantize(ngraph::Output<ngraph::Node> input, float input_sc, float input_zp);
 
-void forwardNgraph(const std::vector<Ptr<BackendWrapper> >& outBlobsWrappers,
-                   Ptr<BackendNode>& node, bool isAsync);
+#endif  // HAVE_DNN_NGRAPH
 
 }}  // namespace cv::dnn
 

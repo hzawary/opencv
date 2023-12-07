@@ -187,7 +187,7 @@ try:
                                               blockSize=block_sz,
                                               useHarrisDetector=use_harris_detector, k=k)
             # NB: The operation output is cv::GArray<cv::Pointf>, so it should be mapped
-            # to python paramaters like this: [(1.2, 3.4), (5.2, 3.2)], because the cv::Point2f
+            # to python parameters like this: [(1.2, 3.4), (5.2, 3.2)], because the cv::Point2f
             # according to opencv rules mapped to the tuple and cv::GArray<> mapped to the list.
             # OpenCV returns np.array with shape (n_features, 1, 2), so let's to convert it to list
             # tuples with size == n_features.
@@ -203,11 +203,52 @@ try:
 
             @staticmethod
             def outMeta(desc):
-                raise NotImplementedError("outMeta isn't imlemented")
+                raise NotImplementedError("outMeta isn't implemented")
         return Op
 
 
+    # NB: Just mock operation to test different kinds for output G-types.
+    @cv.gapi.op('custom.square_mean', in_types=[cv.GArray.Int], out_types=[cv.GOpaque.Float, cv.GArray.Int])
+    class GSquareMean:
+        @staticmethod
+        def outMeta(desc):
+            return cv.empty_gopaque_desc(), cv.empty_array_desc()
+
+
+    @cv.gapi.kernel(GSquareMean)
+    class GSquareMeanImpl:
+        @staticmethod
+        def run(arr):
+            squares = [val**2 for val in arr]
+            return sum(arr) / len(arr), squares
+
+    @cv.gapi.op('custom.squares', in_types=[cv.GArray.Int], out_types=[cv.GArray.Int])
+    class GSquare:
+        @staticmethod
+        def outMeta(desc):
+            return cv.empty_array_desc()
+
+
+    @cv.gapi.kernel(GSquare)
+    class GSquareImpl:
+        @staticmethod
+        def run(arr):
+            squares = [val**2 for val in arr]
+            return squares
+
+
     class gapi_sample_pipelines(NewOpenCVTests):
+        def test_different_output_opaque_kinds(self):
+            g_in = cv.GArray.Int()
+            g_mean, g_squares = GSquareMean.on(g_in)
+            comp = cv.GComputation(cv.GIn(g_in), cv.GOut(g_mean, g_squares))
+
+            pkg = cv.gapi.kernels(GSquareMeanImpl)
+            mean, squares = comp.apply(cv.gin([1,2,3]), args=cv.gapi.compile_args(pkg))
+
+            self.assertEqual([1,4,9], list(squares))
+            self.assertEqual(2.0, mean)
+
 
         def test_custom_op_add(self):
             sz = (3, 3)
@@ -432,7 +473,7 @@ try:
             with self.assertRaises(Exception): create_op([cv.GMat, int], [cv.GMat]).on(cv.GMat())
 
 
-        def test_stateful_kernel(self):
+        def test_state_in_class(self):
             @cv.gapi.op('custom.sum', in_types=[cv.GArray.Int], out_types=[cv.GOpaque.Int])
             class GSum:
                 @staticmethod
@@ -605,7 +646,7 @@ try:
             img1 = np.array([1, 2, 3])
 
             # FIXME: Cause Bad variant access.
-            # Need to provide more descriptive error messsage.
+            # Need to provide more descriptive error message.
             with self.assertRaises(Exception): comp.apply(cv.gin(img0, img1),
                                                           args=cv.gapi.compile_args(
                                                               cv.gapi.kernels(GAddImpl)))

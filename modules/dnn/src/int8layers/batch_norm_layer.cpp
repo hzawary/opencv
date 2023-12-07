@@ -4,6 +4,9 @@
 
 #include "../precomp.hpp"
 #include "layers_common.hpp"
+#include "../op_timvx.hpp"
+#include "../ie_ngraph.hpp"
+
 #include <opencv2/dnn/shape_utils.hpp>
 
 namespace cv
@@ -103,7 +106,13 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
-        return backendId == DNN_BACKEND_OPENCV;
+        if (backendId == DNN_BACKEND_TIMVX && haveTimVX())
+        {
+            return true;
+        }
+
+        return backendId == DNN_BACKEND_OPENCV ||
+               backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH;
     }
 
     bool setActivation(const Ptr<ActivationLayer>& layer) CV_OVERRIDE
@@ -115,6 +124,142 @@ public:
         }
         return false;
     }
+
+    virtual Ptr<BackendNode> initTimVX(void* timVXInfo_,
+                                       const std::vector<Ptr<BackendWrapper> > &inputsWrapper,
+                                       const std::vector<Ptr<BackendWrapper> > &outputsWrapper,
+                                       bool isLast) CV_OVERRIDE
+    {
+#ifdef HAVE_TIMVX
+        // tvGraph Initialization.
+        auto timVxInfo = reinterpret_cast<TimVXInfo *>(timVXInfo_);
+        CV_Assert(timVxInfo);
+        Ptr<TimVXGraph> tvGraph = timVxInfo->getGraph();
+        CV_Assert(tvGraph);
+        Ptr<tim::vx::Graph> graph = tvGraph->graph;
+
+        const int numChannels = (int)origin_bias.total();
+        Mat tvGamma = origin_weights.reshape(1, numChannels);
+        Mat tvBeta = origin_bias.reshape(1, numChannels);
+
+        std::vector<int> inputsIndex;
+        std::vector<int> outputsIndex;
+
+        Mat tvMean = Mat::zeros(1, numChannels, CV_32F);
+        tvMean = tvMean.reshape(1, numChannels);
+        Mat tvVar = Mat::ones(1, numChannels, CV_32F);
+        tvVar = tvVar.reshape(1, numChannels);
+
+        CV_Assert(inputsWrapper.size() == 1);
+        if (outputsWrapper.size() > 1)
+            return Ptr<BackendNode>();
+
+        Ptr<tim::vx::Quantization> tvInputQuant = Ptr<tim::vx::Quantization>(
+                new tim::vx::Quantization(tim::vx::QuantType::ASYMMETRIC, input_sc, input_zp));
+
+        // input Tensor
+        auto inputWrapper = inputsWrapper[0].dynamicCast<TimVXBackendWrapper>();
+        Mat tmpInput = inputWrapper->getMat();
+
+        if (tmpInput.dims != 4)  // Only support 4 dim input.
+            return Ptr<BackendNode>();
+
+        int input_index = -1, mean_index = -1, var_index = -1, gamma_index = -1, beta_index = -1, output_index = -1;
+
+        if (inputWrapper->isTensor())
+        {
+            input_index = tvGraph->getTensorIndex(inputWrapper->getTensor());
+            if (input_index == -1)
+            {
+                // Copy To New inputWrapper
+                Mat tmp = inputWrapper->getMat();
+                inputWrapper = Ptr<TimVXBackendWrapper>(new TimVXBackendWrapper(tmp));
+            }
+        }
+
+        if (!inputWrapper->isTensor())
+        {
+            inputWrapper->createTensor(graph,tim::vx::TensorAttribute::INPUT, tvInputQuant);
+            input_index = tvGraph->addWrapper(inputWrapper);
+        }
+        inputsIndex.push_back(input_index);
+
+        // Mean tensor
+        Ptr<TimVXBackendWrapper> meanWrapper = Ptr<TimVXBackendWrapper>(new TimVXBackendWrapper(tvMean));
+        Ptr<tim::vx::Quantization> meanQuant;
+        meanWrapper->createTensor(graph, tim::vx::TensorAttribute::CONSTANT);
+        mean_index = tvGraph->addWrapper(meanWrapper);
+        inputsIndex.push_back(mean_index);
+
+        // Var tensor
+        Ptr<TimVXBackendWrapper> varWrapper = Ptr<TimVXBackendWrapper>(new TimVXBackendWrapper(tvVar));
+        varWrapper->createTensor(graph,tim::vx::TensorAttribute::CONSTANT);
+        var_index = tvGraph->addWrapper(varWrapper);
+        inputsIndex.push_back(var_index);
+
+        // Gamma tensor
+        Ptr<TimVXBackendWrapper> gammaWrapper = Ptr<TimVXBackendWrapper>(new TimVXBackendWrapper(tvGamma));
+        gammaWrapper->createTensor(graph,tim::vx::TensorAttribute::CONSTANT);
+        gamma_index = tvGraph->addWrapper(gammaWrapper);
+        inputsIndex.push_back(gamma_index);
+
+        // Beta tensor
+        Ptr<TimVXBackendWrapper> betaWrapper = Ptr<TimVXBackendWrapper>(new TimVXBackendWrapper(tvBeta));
+        betaWrapper->createTensor(graph,tim::vx::TensorAttribute::CONSTANT);
+        beta_index = tvGraph->addWrapper(betaWrapper);
+        inputsIndex.push_back(beta_index);
+
+        // Output tensor
+        CV_Assert(outputsWrapper.size() == 1);
+        Ptr<TimVXBackendWrapper> outputWrapper = outputsWrapper[0].dynamicCast<TimVXBackendWrapper>();
+        Ptr<tim::vx::Quantization> outputQuant = Ptr<tim::vx::Quantization>(
+                new tim::vx::Quantization(tim::vx::QuantType::ASYMMETRIC, output_sc, output_zp));
+
+        if (isLast)
+        {
+            auto shapeType = getShapeTypeFromMat(outputWrapper->getMat());
+
+            // For Graph Output tensor, we need to set tensor shape before createTensor().
+            outputWrapper->setTensorShape(shapeType);
+            outputWrapper->createTensor(graph, tim::vx::TensorAttribute::OUTPUT, outputQuant);
+        }
+        else
+        {
+            outputWrapper->createTensor(graph, tim::vx::TensorAttribute::TRANSIENT, outputQuant);
+        }
+
+        output_index = tvGraph->addWrapper(outputWrapper);
+        outputsIndex.push_back(output_index);
+
+        std::shared_ptr<tim::vx::Operation> tvBatchNorm = graph->CreateOperation<tim::vx::ops::BatchNorm>(0.f);
+
+        Ptr<TimVXBackendNode> tvBackendNode = new TimVXBackendNode(tvGraph, tvBatchNorm, inputsIndex, outputsIndex);
+
+        return tvBackendNode;
+#endif  // HAVE_TIMVX
+        return Ptr<BackendNode>();
+    }
+
+#ifdef HAVE_DNN_NGRAPH
+    virtual Ptr<BackendNode> initNgraph(const std::vector<Ptr<BackendWrapper> >& inputs, const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
+    {
+        auto input = nodes[0].dynamicCast<InfEngineNgraphNode>()->node;
+
+        input = ngraphDequantize(input, input_sc, input_zp);
+
+        std::vector<size_t> shape(input.get_shape().size(), 1);
+        shape[1] = origin_weights.total();
+
+        ngraph::Output<ngraph::Node> res;
+        auto ieWeights = std::make_shared<ngraph::op::Constant>(ngraph::element::f32, shape, origin_weights.data);
+        auto ieBias = std::make_shared<ngraph::op::Constant>(ngraph::element::f32, shape, origin_bias.data);
+        res = std::make_shared<ngraph::op::v1::Multiply>(input, ieWeights);
+        res = std::make_shared<ngraph::op::v1::Add>(res, ieBias);
+
+        res = ngraphQuantize(res, output_sc, output_zp);
+        return new InfEngineNgraphNode(res);
+    }
+#endif  // HAVE_DNN_NGRAPH
 
     void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE
     {

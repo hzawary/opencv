@@ -68,6 +68,23 @@ if(MSVC AND CMAKE_C_COMPILER MATCHES "icc|icl")
   set(CV_ICC   __INTEL_COMPILER_FOR_WINDOWS)
 endif()
 
+# ----------------------------------------------------------------------------
+# Detect Intel ICXC compiler
+# ----------------------------------------------------------------------------
+if(UNIX)
+  if(__INTEL_COMPILER)
+    set(CV_ICX   __INTEL_LLVM_COMPILER)
+  elseif(CMAKE_C_COMPILER MATCHES "icx")
+    set(CV_ICX   icx_matches_c_compiler)
+  elseif(CMAKE_CXX_COMPILER MATCHES "icpx")
+    set(CV_ICX   icpx_matches_cxx_compiler)
+  endif()
+endif()
+
+if(MSVC AND CMAKE_CXX_COMPILER MATCHES ".*(dpcpp-cl|dpcpp|icx-cl|icpx|icx)(.exe)?$")
+  set(CV_ICX   __INTEL_LLVM_COMPILER_WINDOWS)
+endif()
+
 if(NOT DEFINED CMAKE_CXX_COMPILER_VERSION
     AND NOT OPENCV_SUPPRESS_MESSAGE_MISSING_COMPILER_VERSION)
   message(WARNING "OpenCV: Compiler version is not available: CMAKE_CXX_COMPILER_VERSION is not set")
@@ -100,6 +117,8 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(mips.*|MIPS.*)")
   set(MIPS 1)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(riscv.*|RISCV.*)")
   set(RISCV 1)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(loongarch64.*|LOONGARCH64.*)")
+  set(LOONGARCH64 1)
 else()
   if(NOT OPENCV_SUPPRESS_MESSAGE_UNRECOGNIZED_SYSTEM_PROCESSOR)
     message(WARNING "OpenCV: unrecognized target processor configuration")

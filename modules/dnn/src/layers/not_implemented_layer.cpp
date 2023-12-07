@@ -8,7 +8,7 @@
 namespace cv { namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
 
-namespace detail {
+inline namespace detail {
 
 class NotImplementedImpl CV_FINAL : public NotImplemented
 {
@@ -87,18 +87,14 @@ public:
         CV_Error(Error::StsNotImplemented, msg);
     }
 
-    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> > &inputs) CV_OVERRIDE
-    {
-        CV_Error(Error::StsNotImplemented, msg);
-    }
-
     virtual Ptr<BackendNode> initNgraph(const std::vector<Ptr<BackendWrapper> > &inputs,
                                         const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
     {
         CV_Error(Error::StsNotImplemented, msg);
     }
 
-    virtual Ptr<BackendNode> initVkCom(const std::vector<Ptr<BackendWrapper> > &inputs) CV_OVERRIDE
+    virtual Ptr<BackendNode> initVkCom(const std::vector<Ptr<BackendWrapper> > &inputs,
+                                       std::vector<Ptr<BackendWrapper> > &outputs) CV_OVERRIDE
     {
         CV_Error(Error::StsNotImplemented, msg);
     }

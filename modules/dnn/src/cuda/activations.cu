@@ -249,6 +249,26 @@ void selu(const Stream& stream, Span<T> output, View<T> input, T alpha, T gamma)
 }
 
 template <class T>
+void gelu(const Stream& stream, Span<T> output, View<T> input) {
+    generic_op<T, GeluFunctor<T>>(stream, output, input);
+}
+
+template <class T>
+void sign(const Stream& stream, Span<T> output, View<T> input) {
+    generic_op<T, SignFunctor<T>>(stream, output, input);
+}
+
+template <class T>
+void shrink(const Stream& stream, Span<T> output, View<T> input, T bias, T lambd) {
+    generic_op<T, ShrinkFunctor<T>>(stream, output, input, {bias, lambd});
+}
+
+template <class T>
+void reciprocal(const Stream& stream, Span<T> output, View<T> input) {
+    generic_op<T, ReciprocalFunctor<T>>(stream, output, input);
+}
+
+template <class T>
 void thresholdedrelu(const Stream& stream, Span<T> output, View<T> input, T alpha) {
     generic_op<T, ThresholdedReluFunctor<T>>(stream, output, input, {alpha});
 }
@@ -309,9 +329,13 @@ template void tan<__half>(const Stream&, Span<__half>, View<__half>);
 template void celu<__half>(const Stream&, Span<__half>, View<__half>, __half);
 template void hardsigmoid<__half>(const Stream&, Span<__half>, View<__half>, __half, __half);
 template void selu<__half>(const Stream&, Span<__half>, View<__half>, __half, __half);
+template void gelu<__half>(const Stream&, Span<__half>, View<__half>);
 template void thresholdedrelu<__half>(const Stream&, Span<__half>, View<__half>, __half);
 template void power<__half>(const Stream&, Span<__half>, View<__half>, __half, __half, __half);
 template void exp<__half>(const Stream&, Span<__half>, View<__half>, __half, __half);
+template void sign<__half>(const Stream&, Span<__half>, View<__half>);
+template void shrink<__half>(const Stream&, Span<__half>, View<__half>, __half, __half);
+template void reciprocal<__half>(const Stream&, Span<__half>, View<__half>);
 #endif
 
 
@@ -348,9 +372,13 @@ template void tan<float>(const Stream&, Span<float>, View<float>);
 template void celu<float>(const Stream&, Span<float>, View<float>, float);
 template void hardsigmoid<float>(const Stream&, Span<float>, View<float>, float, float);
 template void selu<float>(const Stream&, Span<float>, View<float>, float, float);
+template void gelu<float>(const Stream&, Span<float>, View<float>);
 template void thresholdedrelu<float>(const Stream&, Span<float>, View<float>, float);
 template void power<float>(const Stream&, Span<float>, View<float>, float, float, float);
 template void exp<float>(const Stream&, Span<float>, View<float>, float, float);
+template void sign<float>(const Stream&, Span<float>, View<float>);
+template void shrink<float>(const Stream&, Span<float>, View<float>, float, float);
+template void reciprocal<float>(const Stream&, Span<float>, View<float>);
 
 template <class T, std::size_t N> static
 void launch_vectorized_axiswise_relu(const Stream& stream, Span<T> output, View<T> input, std::size_t inner_size, View<T> slope) {

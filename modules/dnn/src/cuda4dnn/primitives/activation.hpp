@@ -538,6 +538,20 @@ namespace cv { namespace dnn { namespace cuda4dnn {
     };
 
     template <class T>
+    class GeluOp final : public BaseOp<GeluOp, T> {
+    public:
+        GeluOp(csl::Stream stream_) : stream(std::move(stream_)) { }
+
+        void calculate(csl::TensorSpan<T> output, csl::TensorView<T> input) const
+        {
+            kernels::gelu<T>(stream, output, input);
+        }
+
+    private:
+        csl::Stream stream;
+    };
+
+    template <class T>
     class ThresholdedReluOp final : public BaseOp<ThresholdedReluOp, T> {
     public:
         ThresholdedReluOp(csl::Stream stream_, T alpha_) : stream(std::move(stream_)), alpha{ alpha_ } { }
@@ -582,6 +596,52 @@ namespace cv { namespace dnn { namespace cuda4dnn {
     private:
         csl::Stream stream;
         const T normScale, normShift;
+    };
+
+    template <class T>
+    class ShrinkOp final : public BaseOp<ShrinkOp, T> {
+    public:
+        ShrinkOp(csl::Stream stream_, T bias_, T lambd_)
+                : stream(std::move(stream_)), bias{ bias_ }, lambd{ lambd_ } { }
+
+        void calculate(csl::TensorSpan<T> output, csl::TensorView<T> input) const
+        {
+            kernels::shrink<T>(stream, output, input, bias, lambd);
+        }
+
+    private:
+        csl::Stream stream;
+        const T bias, lambd;
+    };
+
+    template <class T>
+    class SignOp final : public BaseOp<SignOp, T> {
+    public:
+        SignOp(csl::Stream stream_)
+                : stream(std::move(stream_)) { }
+
+        void calculate(csl::TensorSpan<T> output, csl::TensorView<T> input) const
+        {
+            kernels::sign<T>(stream, output, input);
+        }
+
+    private:
+        csl::Stream stream;
+    };
+
+    template <class T>
+    class ReciprocalOp final : public BaseOp<ReciprocalOp, T> {
+    public:
+        ReciprocalOp(csl::Stream stream_)
+                : stream(std::move(stream_)) { }
+
+        void calculate(csl::TensorSpan<T> output, csl::TensorView<T> input) const
+        {
+            kernels::reciprocal<T>(stream, output, input);
+        }
+
+    private:
+        csl::Stream stream;
     };
 
 }}} /* namespace cv::dnn::cuda4dnn */

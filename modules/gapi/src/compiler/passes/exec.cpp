@@ -142,6 +142,11 @@ namespace
         std::unordered_set<CycleCausers, CycleHasher> cycle_causers;
     };
 
+#if defined(__GNUC__) && (__GNUC__ == 13)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdangling-reference"
+#endif
+
     bool canMerge(const GIslandModel::Graph &g,
                   const ade::NodeHandle &a_nh,
                   const ade::NodeHandle &slot_nh,
@@ -190,6 +195,10 @@ namespace
         }
         return true;
     }
+
+#if defined(__GNUC__) && (__GNUC__ == 13)
+#pragma GCC diagnostic pop
+#endif
 
     inline bool isProducedBy(const ade::NodeHandle &slot,
                              const ade::NodeHandle &island)
@@ -606,7 +615,9 @@ namespace
         MergeContext mc;
 
         bool there_was_a_merge = false;
+#ifdef DEBUG_MERGE
         std::size_t iteration = 0u;
+#endif
         do
         {
             there_was_a_merge = false;
@@ -615,8 +626,8 @@ namespace
 #ifdef DEBUG_MERGE
             GAPI_LOG_INFO(NULL, "Before next merge attempt " << iteration << "...");
             merge_debug(g, iteration);
-#endif
             iteration++;
+#endif
             auto sorted = pass_helpers::topoSort(im);
             for (auto nh : sorted)
             {

@@ -150,7 +150,7 @@ void eltwise_op(const Stream& stream, TensorSpan<T> output, TensorView<T> x, Ten
          */
         for (int r = 0; r < output.rank(); r++)
         {
-            while (x.get_axis_size(r) == 1 && y.get_axis_size(r) == 1) {
+            while (x.rank() > r && y.rank() > r && x.get_axis_size(r) == 1 && y.get_axis_size(r) == 1) {
                 CV_Assert(output.get_axis_size(r) == 1);
 
                 x.squeeze(r);
@@ -183,6 +183,9 @@ void eltwise_op(const Stream& stream, TensorSpan<T> output, TensorView<T> x, Ten
                     auto new_size = inShape1[i] * inShape1[j];
                     inShape1[i] = new_size;
                     inShape2[i] = new_size;
+                    // outShape should be changed after merged
+                    auto output_new_size = outShape[i] * outShape[j];
+                    outShape[i] = output_new_size;
 
                     /* delete axis `j` */
                     inShape1.erase(std::begin(inShape1) + j);
@@ -316,7 +319,13 @@ void eltwise_div_2(const Stream& stream, TensorSpan<T> output, TensorView<T> x, 
     eltwise_op<T, DivFunctor<T>>(stream, output, x, y);
 }
 
+template <class T>
+void eltwise_sub_2(const Stream& stream, TensorSpan<T> output, TensorView<T> x, TensorView<T> y) {
+    eltwise_op<T, SubFunctor<T>>(stream, output, x, y);
+}
+
 #if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 530)
+    template void eltwise_sub_2(const Stream& stream, TensorSpan<__half> output, TensorView<__half> x, TensorView<__half> y);
     template void eltwise_div_2(const Stream& stream, TensorSpan<__half> output, TensorView<__half> x, TensorView<__half> y);
     template void eltwise_prod_2(const Stream& stream, TensorSpan<__half> output, TensorView<__half> x, TensorView<__half> y);
     template void eltwise_sum_coeff_2(const Stream&, TensorSpan<__half>, __half, TensorView<__half>, __half, TensorView<__half>);
@@ -324,6 +333,7 @@ void eltwise_div_2(const Stream& stream, TensorSpan<T> output, TensorView<T> x, 
     template void eltwise_max_2(const Stream& stream, TensorSpan<__half> output, TensorView<__half> x, TensorView<__half> y);
     template void eltwise_min_2(const Stream& stream, TensorSpan<__half> output, TensorView<__half> x, TensorView<__half> y);
 #endif
+    template void eltwise_sub_2(const Stream& stream, TensorSpan<float> output, TensorView<float> x, TensorView<float> y);
     template void eltwise_div_2(const Stream& stream, TensorSpan<float> output, TensorView<float> x, TensorView<float> y);
     template void eltwise_prod_2(const Stream& stream, TensorSpan<float> output, TensorView<float> x, TensorView<float> y);
     template void eltwise_sum_coeff_2(const Stream&, TensorSpan<float>, float, TensorView<float>, float, TensorView<float>);

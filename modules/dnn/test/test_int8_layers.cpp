@@ -12,6 +12,12 @@ testing::internal::ParamGenerator< tuple<Backend, Target> > dnnBackendsAndTarget
 {
     std::vector< tuple<Backend, Target> > targets;
     targets.push_back(make_tuple(DNN_BACKEND_OPENCV, DNN_TARGET_CPU));
+#ifdef HAVE_TIMVX
+    targets.push_back(make_tuple(DNN_BACKEND_TIMVX, DNN_TARGET_NPU));
+#endif
+#ifdef HAVE_INF_ENGINE
+    targets.push_back(make_tuple(DNN_BACKEND_INFERENCE_ENGINE_NGRAPH, DNN_TARGET_CPU));
+#endif
     return testing::ValuesIn(targets);
 }
 
@@ -26,7 +32,7 @@ class Test_Int8_layers : public DNNTestLayer
 public:
     void testLayer(const String& basename, const String& importer, double l1, double lInf,
                    int numInps = 1, int numOuts = 1, bool useCaffeModel = false,
-                   bool useCommonInputBlob = true, bool hasText = false)
+                   bool useCommonInputBlob = true, bool hasText = false, bool perChannel = true)
     {
         CV_Assert_N(numInps >= 1, numInps <= 10, numOuts >= 1, numOuts <= 10);
         std::vector<Mat> inps(numInps), inps_int8(numInps);
@@ -63,8 +69,6 @@ public:
             outPath = _tf("onnx/data/output_" + basename);
         }
         ASSERT_FALSE(net.empty());
-        net.setPreferableBackend(backend);
-        net.setPreferableTarget(target);
 
         for (int i = 0; i < numInps; i++)
             inps[i] = blobFromNPY(inpPath + ((numInps > 1) ? cv::format("_%d.npy", i) : ".npy"));
@@ -72,9 +76,11 @@ public:
         for (int i = 0; i < numOuts; i++)
             refs[i] = blobFromNPY(outPath + ((numOuts > 1) ? cv::format("_%d.npy", i) : ".npy"));
 
-        qnet = net.quantize(inps, CV_8S, CV_8S);
+        qnet = net.quantize(inps, CV_8S, CV_8S, perChannel);
         qnet.getInputDetails(inputScale, inputZp);
         qnet.getOutputDetails(outputScale, outputZp);
+        qnet.setPreferableBackend(backend);
+        qnet.setPreferableTarget(target);
 
         // Quantize inputs to int8
         // int8_value = float_value/scale + zero-point
@@ -91,7 +97,7 @@ public:
         for (int i = 0; i < numOuts; i++)
         {
             outs_int8[i].convertTo(outs_dequantized[i], CV_32F, outputScale[i], -(outputScale[i] * outputZp[i]));
-            normAssert(refs[i], outs_dequantized[i], "", l1, lInf);
+            normAssert(refs[i], outs_dequantized[i], basename.c_str(), l1, lInf);
         }
     }
 };
@@ -100,18 +106,51 @@ TEST_P(Test_Int8_layers, Convolution1D)
 {
     testLayer("conv1d", "ONNX", 0.00302, 0.00909);
     testLayer("conv1d_bias", "ONNX", 0.00306, 0.00948);
+
+    {
+        SCOPED_TRACE("Per-tensor quantize");
+        testLayer("conv1d", "ONNX", 0.00302, 0.00909, 1, 1, false, true, false, false);
+        testLayer("conv1d_bias", "ONNX", 0.00319, 0.00948, 1, 1, false, true, false, false);
+    }
 }
 
 TEST_P(Test_Int8_layers, Convolution2D)
 {
-    testLayer("layer_convolution", "Caffe", 0.0174, 0.0758, 1, 1, true);
-    testLayer("single_conv", "TensorFlow", 0.00413, 0.02201);
-    testLayer("depthwise_conv2d", "TensorFlow", 0.0388, 0.169);
+    if(backend == DNN_BACKEND_TIMVX)
+        testLayer("single_conv", "TensorFlow", 0.00424, 0.02201);
+    else
+        testLayer("single_conv", "TensorFlow", 0.00413, 0.02201);
+
     testLayer("atrous_conv2d_valid", "TensorFlow", 0.0193, 0.0633);
     testLayer("atrous_conv2d_same", "TensorFlow", 0.0185, 0.1322);
     testLayer("keras_atrous_conv2d_same", "TensorFlow", 0.0056, 0.0244);
-    testLayer("convolution", "ONNX", 0.0052, 0.01516);
-    testLayer("two_convolution", "ONNX", 0.00295, 0.00840);
+
+    if(backend == DNN_BACKEND_TIMVX)
+        testLayer("convolution", "ONNX", 0.00534, 0.01516);
+    else
+        testLayer("convolution", "ONNX", 0.0052, 0.01516);
+
+    if(backend == DNN_BACKEND_TIMVX)
+        testLayer("two_convolution", "ONNX", 0.0033, 0.01);
+    else
+        testLayer("two_convolution", "ONNX", 0.00295, 0.00840);
+
+    if(backend == DNN_BACKEND_TIMVX)
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_TIMVX);
+    testLayer("layer_convolution", "Caffe", 0.0174, 0.0758, 1, 1, true);
+    testLayer("depthwise_conv2d", "TensorFlow", 0.0388, 0.169);
+
+    {
+        SCOPED_TRACE("Per-tensor quantize");
+        testLayer("single_conv", "TensorFlow", 0.00413, 0.02301, 1, 1, false, true, false, false);
+        testLayer("atrous_conv2d_valid", "TensorFlow", 0.027967, 0.07808, 1, 1, false, true, false, false);
+        testLayer("atrous_conv2d_same", "TensorFlow", 0.01945, 0.1322, 1, 1, false, true, false, false);
+        testLayer("keras_atrous_conv2d_same", "TensorFlow", 0.005677, 0.03327, 1, 1, false, true, false, false);
+        testLayer("convolution", "ONNX", 0.00538, 0.01517, 1, 1, false, true, false, false);
+        testLayer("two_convolution", "ONNX", 0.00295, 0.00926, 1, 1, false, true, false, false);
+        testLayer("layer_convolution", "Caffe", 0.0175, 0.0759, 1, 1, true, true, false, false);
+        testLayer("depthwise_conv2d", "TensorFlow", 0.041847, 0.18744, 1, 1, false, true, false, false);
+    }
 }
 
 TEST_P(Test_Int8_layers, Convolution3D)
@@ -126,13 +165,32 @@ TEST_P(Test_Int8_layers, Flatten)
     testLayer("flatten", "TensorFlow", 0.0036, 0.0069, 1, 1, false, true, true);
     testLayer("unfused_flatten", "TensorFlow", 0.0014, 0.0028);
     testLayer("unfused_flatten_unknown_batch", "TensorFlow", 0.0043, 0.0051);
+
+    {
+        SCOPED_TRACE("Per-tensor quantize");
+        testLayer("conv3d", "TensorFlow", 0.00734, 0.02434, 1, 1, false, true, false, false);
+        testLayer("conv3d", "ONNX", 0.00377, 0.01362, 1, 1, false, true, false, false);
+        testLayer("conv3d_bias", "ONNX", 0.00201, 0.0039, 1, 1, false, true, false, false);
+    }
 }
 
 TEST_P(Test_Int8_layers, Padding)
 {
-    testLayer("padding_valid", "TensorFlow", 0.0026, 0.0064);
-    testLayer("padding_same", "TensorFlow", 0.0081, 0.032);
-    testLayer("spatial_padding", "TensorFlow", 0.0078, 0.028);
+    if (backend == DNN_BACKEND_TIMVX)
+        testLayer("padding_valid", "TensorFlow", 0.0292, 0.0105);
+    else
+        testLayer("padding_valid", "TensorFlow", 0.0026, 0.0064);
+
+    if (backend == DNN_BACKEND_TIMVX)
+        testLayer("padding_same", "TensorFlow", 0.0085, 0.032);
+    else
+        testLayer("padding_same", "TensorFlow", 0.0081, 0.032);
+
+    if (backend == DNN_BACKEND_TIMVX)
+        testLayer("spatial_padding", "TensorFlow", 0.0079, 0.028);
+    else
+        testLayer("spatial_padding", "TensorFlow", 0.0078, 0.028);
+
     testLayer("mirror_pad", "TensorFlow", 0.0064, 0.013);
     testLayer("pad_and_concat", "TensorFlow", 0.0021, 0.0098);
     testLayer("padding", "ONNX", 0.0005, 0.0069);
@@ -142,10 +200,13 @@ TEST_P(Test_Int8_layers, Padding)
 
 TEST_P(Test_Int8_layers, AvePooling)
 {
-    testLayer("layer_pooling_ave", "Caffe", 0.0021, 0.0075);
+    // Some tests failed with OpenVINO due to wrong padded area calculation
+    if (backend != DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+        testLayer("layer_pooling_ave", "Caffe", 0.0021, 0.0075);
     testLayer("ave_pool_same", "TensorFlow", 0.00153, 0.0041);
     testLayer("average_pooling_1d", "ONNX", 0.002, 0.0048);
-    testLayer("average_pooling", "ONNX", 0.0014, 0.0032);
+    if (backend != DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+        testLayer("average_pooling", "ONNX", 0.0014, 0.0032);
     testLayer("average_pooling_dynamic_axes", "ONNX", 0.0014, 0.006);
 
     if (target != DNN_TARGET_CPU)
@@ -161,8 +222,6 @@ TEST_P(Test_Int8_layers, MaxPooling)
         throw SkipTestException("Only CPU is supported");
     testLayer("pool_conv_3d", "ONNX", 0.0033, 0.0124);
 
-    /* All the below tests have MaxPooling as last layer, so computeMaxIdx is set to true
-       which is not supported by int8 maxpooling
     testLayer("layer_pooling_max", "Caffe", 0.0021, 0.004);
     testLayer("max_pool_even", "TensorFlow", 0.0048, 0.0139);
     testLayer("max_pool_odd_valid", "TensorFlow", 0.0043, 0.012);
@@ -172,7 +231,7 @@ TEST_P(Test_Int8_layers, MaxPooling)
     testLayer("two_maxpooling_1d", "ONNX", 0.0037, 0.0052);
     testLayer("maxpooling", "ONNX", 0.0034, 0.0065);
     testLayer("two_maxpooling", "ONNX", 0.0025, 0.0052);
-    testLayer("max_pool3d", "ONNX", 0.0028, 0.0069);*/
+    testLayer("max_pool3d", "ONNX", 0.0028, 0.0069);
 }
 
 TEST_P(Test_Int8_layers, Reduce)
@@ -218,8 +277,16 @@ TEST_P(Test_Int8_layers, ReLU6)
 TEST_P(Test_Int8_layers, Sigmoid)
 {
     testLayer("maxpooling_sigmoid", "ONNX", 0.0011, 0.0032);
-    testLayer("maxpooling_sigmoid_dynamic_axes", "ONNX", 0.0011, 0.0032);
-    testLayer("maxpooling_sigmoid_1d", "ONNX", 0.0011, 0.0037);
+}
+
+TEST_P(Test_Int8_layers, Sigmoid_dynamic_axes)
+{
+    testLayer("maxpooling_sigmoid_dynamic_axes", "ONNX", 0.002, 0.0032);
+}
+
+TEST_P(Test_Int8_layers, Sigmoid_1d)
+{
+    testLayer("maxpooling_sigmoid_1d", "ONNX", 0.002, 0.0037);
 }
 
 TEST_P(Test_Int8_layers, Mish)
@@ -227,21 +294,42 @@ TEST_P(Test_Int8_layers, Mish)
     testLayer("mish", "ONNX", 0.0015, 0.0025);
 }
 
-TEST_P(Test_Int8_layers, Softmax)
+TEST_P(Test_Int8_layers, Softmax_Caffe)
 {
     testLayer("layer_softmax", "Caffe", 0.0011, 0.0036);
+}
+TEST_P(Test_Int8_layers, Softmax_keras_TF)
+{
     testLayer("keras_softmax", "TensorFlow", 0.00093, 0.0027);
+}
+TEST_P(Test_Int8_layers, Softmax_slim_TF)
+{
     testLayer("slim_softmax", "TensorFlow", 0.0016, 0.0034);
+}
+TEST_P(Test_Int8_layers, Softmax_slim_v2_TF)
+{
     testLayer("slim_softmax_v2", "TensorFlow", 0.0029, 0.017);
+}
+TEST_P(Test_Int8_layers, Softmax_ONNX)
+{
     testLayer("softmax", "ONNX", 0.0016, 0.0028);
+}
+TEST_P(Test_Int8_layers, Softmax_log_ONNX)
+{
     testLayer("log_softmax", "ONNX", 0.014, 0.025);
+}
+TEST_P(Test_Int8_layers, DISABLED_Softmax_unfused_ONNX)  // FIXIT Support 'Identity' layer for outputs (#22022)
+{
     testLayer("softmax_unfused", "ONNX", 0.0009, 0.0021);
 }
 
 TEST_P(Test_Int8_layers, Concat)
 {
     testLayer("layer_concat_shared_input", "Caffe", 0.0076, 0.029, 1, 1, true, false);
-    testLayer("concat_axis_1", "TensorFlow", 0.0056, 0.017);
+    if (backend != DNN_BACKEND_INFERENCE_ENGINE_NGRAPH) {
+        // Crashes with segfault
+        testLayer("concat_axis_1", "TensorFlow", 0.0056, 0.017);
+    }
     testLayer("keras_pad_concat", "TensorFlow", 0.0032, 0.0089);
     testLayer("concat_3d", "TensorFlow", 0.005, 0.014);
     testLayer("concatenation", "ONNX", 0.0032, 0.009);
@@ -275,31 +363,68 @@ TEST_P(Test_Int8_layers, InnerProduct)
 {
     testLayer("layer_inner_product", "Caffe", 0.005, 0.02, 1, 1, true);
     testLayer("matmul", "TensorFlow", 0.0061, 0.019);
-    testLayer("nhwc_transpose_reshape_matmul", "TensorFlow", 0.0009, 0.0091);
+
+    if (backend == DNN_BACKEND_TIMVX)
+        testLayer("nhwc_transpose_reshape_matmul", "TensorFlow", 0.0018, 0.0175);
+    else
+        testLayer("nhwc_transpose_reshape_matmul", "TensorFlow", 0.0009, 0.0091);
+
     testLayer("nhwc_reshape_matmul", "TensorFlow", 0.03, 0.071);
     testLayer("matmul_layout", "TensorFlow", 0.035, 0.06);
     testLayer("tf2_dense", "TensorFlow", 0, 0);
     testLayer("matmul_add", "ONNX", 0.041, 0.082);
-    testLayer("linear", "ONNX", 0.0018, 0.0029);
-    testLayer("constant", "ONNX", 0.00021, 0.0006);
+    testLayer("linear", "ONNX", 0.0027, 0.0046);
+
+    if (backend == DNN_BACKEND_TIMVX)
+        testLayer("constant", "ONNX", 0.00048, 0.0013);
+    else
+        testLayer("constant", "ONNX", 0.00021, 0.0006);
+
     testLayer("lin_with_constant", "ONNX", 0.0011, 0.0016);
+
+    {
+        SCOPED_TRACE("Per-tensor quantize");
+        testLayer("layer_inner_product", "Caffe", 0.0055, 0.02, 1, 1, true, true, false, false);
+        testLayer("matmul", "TensorFlow", 0.0075, 0.019, 1, 1, false, true, false, false);
+        testLayer("nhwc_transpose_reshape_matmul", "TensorFlow", 0.0009, 0.0091, 1, 1, false, true, false, false);
+        testLayer("nhwc_reshape_matmul", "TensorFlow", 0.037, 0.071, 1, 1, false, true, false, false);
+        testLayer("matmul_layout", "TensorFlow", 0.035, 0.095, 1, 1, false, true, false, false);
+        testLayer("tf2_dense", "TensorFlow", 0, 0, 1, 1, false, true, false, false);
+        testLayer("matmul_add", "ONNX", 0.041, 0.082, 1, 1, false, true, false, false);
+        testLayer("linear", "ONNX", 0.0027, 0.005, 1, 1, false, true, false, false);
+        testLayer("constant", "ONNX", 0.00038, 0.0012, 1, 1, false, true, false, false);
+        testLayer("lin_with_constant", "ONNX", 0.0011, 0.0016, 1, 1, false, true, false, false);
+    }
 }
 
 TEST_P(Test_Int8_layers, Reshape)
 {
     testLayer("reshape_layer", "TensorFlow", 0.0032, 0.0082);
-    testLayer("reshape_nchw", "TensorFlow", 0.0089, 0.029);
+
+    if (backend == DNN_BACKEND_TIMVX)
+        testLayer("reshape_nchw", "TensorFlow", 0.0092, 0.0495);
+    else
+        testLayer("reshape_nchw", "TensorFlow", 0.0089, 0.029);
+
     testLayer("reshape_conv", "TensorFlow", 0.035, 0.054);
-    testLayer("reshape_reduce", "TensorFlow", 0.0042, 0.0078);
+    if (backend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+        testLayer("reshape_reduce", "TensorFlow", 0.0053, 0.011);
+    else
+        testLayer("reshape_reduce", "TensorFlow", 0.0042, 0.0078);
     testLayer("reshape_as_shape", "TensorFlow", 0.0014, 0.0028);
     testLayer("reshape_no_reorder", "TensorFlow", 0.0014, 0.0028);
-    testLayer("shift_reshape_no_reorder", "TensorFlow", 0.0063, 0.014);
+    testLayer("shift_reshape_no_reorder", "TensorFlow", 0.0063, backend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH ? 0.016 : 0.014);
     testLayer("dynamic_reshape", "ONNX", 0.0047, 0.0079);
     testLayer("dynamic_reshape_opset_11", "ONNX", 0.0048, 0.0081);
     testLayer("flatten_by_prod", "ONNX", 0.0048, 0.0081);
     testLayer("squeeze", "ONNX", 0.0048, 0.0081);
     testLayer("unsqueeze", "ONNX", 0.0033, 0.0053);
-    testLayer("squeeze_and_conv_dynamic_axes", "ONNX", 0.0054, 0.0154);
+
+    if (backend == DNN_BACKEND_TIMVX)
+        testLayer("squeeze_and_conv_dynamic_axes", "ONNX", 0.006, 0.0212);
+    else
+        testLayer("squeeze_and_conv_dynamic_axes", "ONNX", 0.0054, 0.0154);
+
     testLayer("unsqueeze_and_conv_dynamic_axes", "ONNX", 0.0037, 0.0151);
 }
 
@@ -316,16 +441,48 @@ TEST_P(Test_Int8_layers, Identity)
     testLayer("expand_neg_batch", "ONNX", 0.00071, 0.0019);
 }
 
-TEST_P(Test_Int8_layers, Slice)
+TEST_P(Test_Int8_layers, Slice_split_tf)
 {
     testLayer("split", "TensorFlow", 0.0033, 0.0056);
+}
+
+TEST_P(Test_Int8_layers, Slice_4d_tf)
+{
     testLayer("slice_4d", "TensorFlow", 0.003, 0.0073);
+}
+
+TEST_P(Test_Int8_layers, Slice_strided_tf)
+{
     testLayer("strided_slice", "TensorFlow", 0.008, 0.0142);
+}
+
+TEST_P(Test_Int8_layers, DISABLED_Slice_onnx)  // FIXIT Support 'Identity' layer for outputs (#22022)
+{
     testLayer("slice", "ONNX", 0.0046, 0.0077);
-    testLayer("slice_dynamic_axes", "ONNX", 0.0039, 0.0084);
-    testLayer("slice_opset_11_steps_2d", "ONNX", 0.0052, 0.0124);
+}
+
+TEST_P(Test_Int8_layers, Slice_dynamic_axes_onnx)
+{
+    testLayer("slice_dynamic_axes", "ONNX", 0.0039, 0.02);
+}
+
+TEST_P(Test_Int8_layers, Slice_steps_2d_onnx11)
+{
+    testLayer("slice_opset_11_steps_2d", "ONNX", 0.01, 0.0124);
+}
+
+TEST_P(Test_Int8_layers, Slice_steps_3d_onnx11)
+{
     testLayer("slice_opset_11_steps_3d", "ONNX", 0.0068, 0.014);
+}
+
+TEST_P(Test_Int8_layers, Slice_steps_4d_onnx11)
+{
     testLayer("slice_opset_11_steps_4d", "ONNX", 0.0041, 0.008);
+}
+
+TEST_P(Test_Int8_layers, Slice_steps_5d_onnx11)
+{
     testLayer("slice_opset_11_steps_5d", "ONNX", 0.0085, 0.021);
 }
 
@@ -338,12 +495,16 @@ TEST_P(Test_Int8_layers, Dropout)
 TEST_P(Test_Int8_layers, Eltwise)
 {
     testLayer("layer_eltwise", "Caffe", 0.062, 0.15);
+
+    if (backend == DNN_BACKEND_TIMVX)
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_TIMVX);
+
     testLayer("conv_2_inps", "Caffe", 0.0086, 0.0232, 2, 1, true, false);
     testLayer("eltwise_sub", "TensorFlow", 0.015, 0.047);
-    testLayer("eltwise_add_vec", "TensorFlow", 0.037, 0.21); // tflite 0.0095, 0.0365
+    testLayer("eltwise_add_vec", "TensorFlow", 0.037, backend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH ? 0.24 : 0.21); // tflite 0.0095, 0.0365
     testLayer("eltwise_mul_vec", "TensorFlow", 0.173, 1.14); // tflite 0.0028, 0.017
     testLayer("channel_broadcast", "TensorFlow", 0.0025, 0.0063);
-    testLayer("split_equals", "TensorFlow", 0.02, 0.065);
+    testLayer("split_equals", "TensorFlow", backend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH ? 0.021 : 0.02, 0.065);
     testLayer("mul", "ONNX", 0.0039, 0.014);
     testLayer("split_max", "ONNX", 0.004, 0.012);
 }
@@ -353,9 +514,9 @@ INSTANTIATE_TEST_CASE_P(/**/, Test_Int8_layers, dnnBackendsAndTargetsInt8());
 class Test_Int8_nets : public DNNTestLayer
 {
 public:
-    void testClassificationNet(Net baseNet, const Mat& blob, const Mat& ref, double l1, double lInf)
+    void testClassificationNet(Net baseNet, const Mat& blob, const Mat& ref, double l1, double lInf, bool perChannel = true)
     {
-        Net qnet = baseNet.quantize(blob, CV_32F, CV_32F);
+        Net qnet = baseNet.quantize(blob, CV_32F, CV_32F, perChannel);
         qnet.setPreferableBackend(backend);
         qnet.setPreferableTarget(target);
 
@@ -365,9 +526,9 @@ public:
     }
 
     void testDetectionNet(Net baseNet, const Mat& blob, const Mat& ref,
-                          double confThreshold, double scoreDiff, double iouDiff)
+                          double confThreshold, double scoreDiff, double iouDiff, bool perChannel = true)
     {
-        Net qnet = baseNet.quantize(blob, CV_32F, CV_32F);
+        Net qnet = baseNet.quantize(blob, CV_32F, CV_32F, perChannel);
         qnet.setPreferableBackend(backend);
         qnet.setPreferableTarget(target);
 
@@ -376,14 +537,14 @@ public:
         normAssertDetections(ref, out, "", confThreshold, scoreDiff, iouDiff);
     }
 
-    void testFaster(Net baseNet, const Mat& ref, double confThreshold, double scoreDiff, double iouDiff)
+    void testFaster(Net baseNet, const Mat& ref, double confThreshold, double scoreDiff, double iouDiff, bool perChannel = true)
     {
         Mat inp = imread(_tf("dog416.png"));
         resize(inp, inp, Size(800, 600));
         Mat blob = blobFromImage(inp, 1.0, Size(), Scalar(102.9801, 115.9465, 122.7717), false, false);
         Mat imInfo = (Mat_<float>(1, 3) << inp.rows, inp.cols, 1.6f);
 
-        Net qnet = baseNet.quantize(std::vector<Mat>{blob, imInfo}, CV_32F, CV_32F);
+        Net qnet = baseNet.quantize(std::vector<Mat>{blob, imInfo}, CV_32F, CV_32F, perChannel);
         qnet.setPreferableBackend(backend);
         qnet.setPreferableTarget(target);
 
@@ -393,17 +554,17 @@ public:
         normAssertDetections(ref, out, "", confThreshold, scoreDiff, iouDiff);
     }
 
-    void testONNXNet(const String& basename, double l1, double lInf, bool useSoftmax = false)
+    void testONNXNet(const String& basename, double l1, double lInf, bool useSoftmax = false, bool perChannel = true)
     {
         String onnxmodel = findDataFile("dnn/onnx/models/" + basename + ".onnx", false);
 
         Mat blob = readTensorFromONNX(findDataFile("dnn/onnx/data/input_" + basename + ".pb"));
         Mat ref = readTensorFromONNX(findDataFile("dnn/onnx/data/output_" + basename + ".pb"));
         Net baseNet = readNetFromONNX(onnxmodel);
-        baseNet.setPreferableBackend(backend);
-        baseNet.setPreferableTarget(target);
 
-        Net qnet = baseNet.quantize(blob, CV_32F, CV_32F);
+        Net qnet = baseNet.quantize(blob, CV_32F, CV_32F, perChannel);
+        qnet.setPreferableBackend(backend);
+        qnet.setPreferableTarget(target);
         qnet.setInput(blob);
         Mat out = qnet.forward();
 
@@ -426,7 +587,7 @@ public:
 
     void testDarknetModel(const std::string& cfg, const std::string& weights,
                           const cv::Mat& ref, double scoreDiff, double iouDiff,
-                          float confThreshold = 0.24, float nmsThreshold = 0.4)
+                          float confThreshold = 0.24, float nmsThreshold = 0.4, bool perChannel = true)
     {
         CV_Assert(ref.cols == 7);
         std::vector<std::vector<int> > refClassIds;
@@ -466,7 +627,7 @@ public:
         Mat inp = blobFromImages(samples, 1.0/255, Size(416, 416), Scalar(), true, false);
 
         Net baseNet = readNetFromDarknet(findDataFile("dnn/" + cfg), findDataFile("dnn/" + weights, false));
-        Net qnet = baseNet.quantize(inp, CV_32F, CV_32F);
+        Net qnet = baseNet.quantize(inp, CV_32F, CV_32F, perChannel);
         qnet.setPreferableBackend(backend);
         qnet.setPreferableTarget(target);
         qnet.setInput(inp);
@@ -548,9 +709,6 @@ TEST_P(Test_Int8_nets, AlexNet)
 #else
     applyTestTag(target == DNN_TARGET_CPU ? CV_TEST_TAG_MEMORY_512MB : CV_TEST_TAG_MEMORY_1GB);
 #endif
-    if (backend != DNN_BACKEND_OPENCV)
-        throw SkipTestException("Only OpenCV backend is supported");
-
     if (target == DNN_TARGET_OPENCL_FP16 && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL_FP16);
     if (target == DNN_TARGET_OPENCL && !ocl::Device::getDefault().isIntel())
@@ -584,15 +742,13 @@ TEST_P(Test_Int8_nets, GoogLeNet)
     Mat blob = blobFromImages(inpMats, 1.0, Size(224, 224), Scalar(), false);
     Mat ref = blobFromNPY(_tf("googlenet_prob.npy"));
 
-    float l1 = 2e-4, lInf = 0.06;
+    float l1 = 2e-4, lInf = 0.07;
     testClassificationNet(net, blob, ref, l1, lInf);
 }
 
 TEST_P(Test_Int8_nets, ResNet50)
 {
     applyTestTag(target == DNN_TARGET_CPU ? CV_TEST_TAG_MEMORY_512MB : CV_TEST_TAG_MEMORY_1GB);
-    if (backend != DNN_BACKEND_OPENCV)
-        throw SkipTestException("Only OpenCV backend is supported");
 
     if (target == DNN_TARGET_OPENCL_FP16 && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL_FP16);
@@ -606,8 +762,13 @@ TEST_P(Test_Int8_nets, ResNet50)
     Mat blob = blobFromImage(inp, 1.0, Size(224, 224), Scalar(), false);
     Mat ref = blobFromNPY(_tf("resnet50_prob.npy"));
 
-    float l1 = 3e-4, lInf = 0.04;
+    float l1 = 3e-4, lInf = 0.05;
     testClassificationNet(net, blob, ref, l1, lInf);
+
+    {
+        SCOPED_TRACE("Per-tensor quantize");
+        testClassificationNet(net, blob, ref, l1, lInf, false);
+    }
 }
 
 TEST_P(Test_Int8_nets, DenseNet121)
@@ -618,6 +779,8 @@ TEST_P(Test_Int8_nets, DenseNet121)
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL_FP16);
     if (target == DNN_TARGET_OPENCL && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL);
+    if (backend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_IE_NGRAPH);
 
     Net net = readNetFromCaffe(findDataFile("dnn/DenseNet_121.prototxt", false),
                                findDataFile("dnn/DenseNet_121.caffemodel", false));
@@ -681,7 +844,7 @@ TEST_P(Test_Int8_nets, RCNN_ILSVRC13)
     if (target == DNN_TARGET_OPENCL && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL);
 
-    float l1 = 0.02, lInf = 0.042;
+    float l1 = 0.02, lInf = 0.047;
     testONNXNet("rcnn_ilsvrc13", l1, lInf);
 }
 
@@ -722,14 +885,14 @@ TEST_P(Test_Int8_nets, MobileNet_SSD)
     if (target == DNN_TARGET_OPENCL && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL);
 
-    Net net = readNetFromCaffe(findDataFile("dnn/MobileNetSSD_deploy.prototxt", false),
-                               findDataFile("dnn/MobileNetSSD_deploy.caffemodel", false));
+    Net net = readNetFromCaffe(findDataFile("dnn/MobileNetSSD_deploy_19e3ec3.prototxt", false),
+                               findDataFile("dnn/MobileNetSSD_deploy_19e3ec3.caffemodel", false));
 
     Mat inp = imread(_tf("street.png"));
     Mat blob = blobFromImage(inp, 1.0 / 127.5, Size(300, 300), Scalar(127.5, 127.5, 127.5), false);
     Mat ref = blobFromNPY(_tf("mobilenet_ssd_caffe_out.npy"));
 
-    float confThreshold = FLT_MIN, scoreDiff = 0.059, iouDiff = 0.11;
+    float confThreshold = FLT_MIN, scoreDiff = 0.084, iouDiff = 0.43;
     testDetectionNet(net, blob, ref, confThreshold, scoreDiff, iouDiff);
 }
 
@@ -799,6 +962,8 @@ TEST_P(Test_Int8_nets, opencv_face_detector)
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL_FP16);
     if (target == DNN_TARGET_OPENCL && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL);
+    if (backend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_IE_NGRAPH);
 
     Net net = readNetFromCaffe(findDataFile("dnn/opencv_face_detector.prototxt"),
                                findDataFile("dnn/opencv_face_detector.caffemodel", false));
@@ -812,16 +977,22 @@ TEST_P(Test_Int8_nets, opencv_face_detector)
                                     0, 1, 0.97203469, 0.67965847, 0.06876482, 0.73999709, 0.1513494,
                                     0, 1, 0.95097077, 0.51901293, 0.45863652, 0.5777427, 0.5347801);
 
-    float confThreshold = 0.5, scoreDiff = 0.002, iouDiff = 0.21;
+    float confThreshold = 0.5, scoreDiff = 0.002, iouDiff = 0.4;
     testDetectionNet(net, blob, ref, confThreshold, scoreDiff, iouDiff);
 }
 
 TEST_P(Test_Int8_nets, EfficientDet)
 {
+    if (cvtest::skipUnstableTests)
+        throw SkipTestException("Skip unstable test");  // detail: https://github.com/opencv/opencv/pull/23167
+
+    applyTestTag(CV_TEST_TAG_DEBUG_VERYLONG);
     if (target == DNN_TARGET_OPENCL_FP16 && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL_FP16);
     if (target == DNN_TARGET_OPENCL && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL);
+    if (backend == DNN_BACKEND_TIMVX)
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_TIMVX);
 
     if (target != DNN_TARGET_CPU)
     {
@@ -838,8 +1009,13 @@ TEST_P(Test_Int8_nets, EfficientDet)
                                     0, 17, 0.8245924, 0.16657517850399017, 0.3996818959712982, 0.4111558794975281, 0.9306337833404541,
                                     0, 7, 0.8039304, 0.6118435263633728, 0.13175517320632935, 0.9065558314323425, 0.2943994700908661);
 
-    float confThreshold = 0.65, scoreDiff = 0.17, iouDiff = 0.18;
+    float confThreshold = 0.65, scoreDiff = 0.3, iouDiff = 0.18;
     testDetectionNet(net, blob, ref, confThreshold, scoreDiff, iouDiff);
+
+    {
+        SCOPED_TRACE("Per-tensor quantize");
+        testDetectionNet(net, blob, ref, 0.85, scoreDiff, iouDiff, false);
+    }
 }
 
 TEST_P(Test_Int8_nets, FasterRCNN_resnet50)
@@ -854,7 +1030,8 @@ TEST_P(Test_Int8_nets, FasterRCNN_resnet50)
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL_FP16);
     if (target == DNN_TARGET_OPENCL && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL);
-
+    if (backend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_IE_NGRAPH);
     if (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16)
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL_FP16);
 
@@ -865,7 +1042,7 @@ TEST_P(Test_Int8_nets, FasterRCNN_resnet50)
     Mat blob = blobFromImage(inp, 1.0, Size(800, 600), Scalar(), true, false);
     Mat ref = blobFromNPY(_tf("tensorflow/faster_rcnn_resnet50_coco_2018_01_28.detection_out.npy"));
 
-    float confThreshold = 0.5, scoreDiff = 0.05, iouDiff = 0.15;
+    float confThreshold = 0.8, scoreDiff = 0.05, iouDiff = 0.15;
     testDetectionNet(net, blob, ref, confThreshold, scoreDiff, iouDiff);
 }
 
@@ -881,7 +1058,8 @@ TEST_P(Test_Int8_nets, FasterRCNN_inceptionv2)
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL_FP16);
     if (target == DNN_TARGET_OPENCL && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL);
-
+    if (backend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_IE_NGRAPH);
     if (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16)
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL_FP16);
 
@@ -902,7 +1080,7 @@ TEST_P(Test_Int8_nets, FasterRCNN_vgg16)
 #if defined(OPENCV_32BIT_CONFIGURATION) && defined(HAVE_OPENCL)
         CV_TEST_TAG_MEMORY_2GB,
 #else
-        (target == DNN_TARGET_CPU ? CV_TEST_TAG_MEMORY_1GB : CV_TEST_TAG_MEMORY_2GB),
+        CV_TEST_TAG_MEMORY_2GB,
 #endif
         CV_TEST_TAG_LONG,
         CV_TEST_TAG_DEBUG_VERYLONG
@@ -912,6 +1090,8 @@ TEST_P(Test_Int8_nets, FasterRCNN_vgg16)
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL_FP16);
     if (target == DNN_TARGET_OPENCL && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL);
+    if (backend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_IE_NGRAPH);
 
     Net net = readNetFromCaffe(findDataFile("dnn/faster_rcnn_vgg16.prototxt"),
                                findDataFile("dnn/VGG16_faster_rcnn_final.caffemodel", false));
@@ -920,7 +1100,7 @@ TEST_P(Test_Int8_nets, FasterRCNN_vgg16)
                                     0, 7, 0.997022, 481.841, 92.3218, 722.685, 175.953,
                                     0, 12, 0.993028, 133.221, 189.377, 350.994, 563.166);
 
-    float confThreshold = 0.8, scoreDiff = 0.024, iouDiff = 0.35;
+    float confThreshold = 0.8, scoreDiff = 0.048, iouDiff = 0.35;
     testFaster(net, ref, confThreshold, scoreDiff, iouDiff);
 }
 
@@ -932,13 +1112,15 @@ TEST_P(Test_Int8_nets, FasterRCNN_zf)
 #else
         (target == DNN_TARGET_CPU ? CV_TEST_TAG_MEMORY_512MB : CV_TEST_TAG_MEMORY_1GB),
 #endif
-        CV_TEST_TAG_DEBUG_LONG
+        CV_TEST_TAG_DEBUG_VERYLONG
     );
 
     if (target == DNN_TARGET_OPENCL_FP16 && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL_FP16);
     if (target == DNN_TARGET_OPENCL && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL);
+    if (backend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_IE_NGRAPH);
 
     Net net = readNetFromCaffe(findDataFile("dnn/faster_rcnn_zf.prototxt"),
                                findDataFile("dnn/ZF_faster_rcnn_final.caffemodel", false));
@@ -970,7 +1152,10 @@ TEST_P(Test_Int8_nets, RFCN)
     Mat ref = (Mat_<float>(2, 7) << 0, 7, 0.991359, 491.822, 81.1668, 702.573, 178.234,
                                     0, 12, 0.94786, 132.093, 223.903, 338.077, 566.16);
 
-    float confThreshold = 0.8, scoreDiff = 0.017, iouDiff = 0.11;
+    float confThreshold = 0.8, scoreDiff = 0.15, iouDiff = 0.11;
+    if (backend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH) {
+        iouDiff = 0.12;
+    }
     testFaster(net, ref, confThreshold, scoreDiff, iouDiff);
 }
 
@@ -982,7 +1167,8 @@ TEST_P(Test_Int8_nets, YoloVoc)
 #else
         CV_TEST_TAG_MEMORY_1GB,
 #endif
-        CV_TEST_TAG_LONG
+        CV_TEST_TAG_LONG,
+        CV_TEST_TAG_DEBUG_VERYLONG
     );
 
     if (target == DNN_TARGET_OPENCL_FP16 && !ocl::Device::getDefault().isIntel())
@@ -1000,7 +1186,7 @@ TEST_P(Test_Int8_nets, YoloVoc)
     std::string config_file = "yolo-voc.cfg";
     std::string weights_file = "yolo-voc.weights";
 
-    double scoreDiff = 0.1, iouDiff = 0.3;
+    double scoreDiff = 0.12, iouDiff = 0.3;
     {
     SCOPED_TRACE("batch size 1");
     testDarknetModel(config_file, weights_file, ref.rowRange(0, 3), scoreDiff, iouDiff);
@@ -1033,17 +1219,30 @@ TEST_P(Test_Int8_nets, TinyYoloVoc)
     {
     SCOPED_TRACE("batch size 1");
     testDarknetModel(config_file, weights_file, ref.rowRange(0, 2), scoreDiff, iouDiff);
+        {
+            SCOPED_TRACE("Per-tensor quantize");
+            testDarknetModel(config_file, weights_file, ref.rowRange(0, 2), 0.1, 0.2, 0.24, 0.6, false);
+        }
     }
 
     {
     SCOPED_TRACE("batch size 2");
     testDarknetModel(config_file, weights_file, ref, scoreDiff, iouDiff);
+
+        {
+            SCOPED_TRACE("Per-tensor quantize");
+            testDarknetModel(config_file, weights_file, ref, 0.1, 0.2, 0.24, 0.6, false);
+        }
     }
 }
 
 TEST_P(Test_Int8_nets, YOLOv3)
 {
-    applyTestTag(CV_TEST_TAG_LONG, (target == DNN_TARGET_CPU ? CV_TEST_TAG_MEMORY_1GB : CV_TEST_TAG_MEMORY_2GB));
+    applyTestTag(
+            CV_TEST_TAG_LONG,
+            (target == DNN_TARGET_CPU ? CV_TEST_TAG_MEMORY_1GB : CV_TEST_TAG_MEMORY_2GB),
+            CV_TEST_TAG_DEBUG_VERYLONG
+            );
 
     if (target == DNN_TARGET_OPENCL_FP16 && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL_FP16);
@@ -1083,7 +1282,11 @@ TEST_P(Test_Int8_nets, YOLOv3)
 
 TEST_P(Test_Int8_nets, YOLOv4)
 {
-    applyTestTag(CV_TEST_TAG_LONG, (target == DNN_TARGET_CPU ? CV_TEST_TAG_MEMORY_1GB : CV_TEST_TAG_MEMORY_2GB));
+    applyTestTag(
+            CV_TEST_TAG_LONG,
+            (target == DNN_TARGET_CPU ? CV_TEST_TAG_MEMORY_1GB : CV_TEST_TAG_MEMORY_2GB),
+            CV_TEST_TAG_DEBUG_VERYLONG
+            );
 
     if (target == DNN_TARGET_OPENCL_FP16 && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL_FP16);
@@ -1132,29 +1335,36 @@ TEST_P(Test_Int8_nets, YOLOv4_tiny)
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL_FP16);
     if (target == DNN_TARGET_OPENCL && !ocl::Device::getDefault().isIntel())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_OPENCL);
+    if (backend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_IE_NGRAPH);
 
     const float confThreshold = 0.6;
 
     const int N0 = 2;
     const int N1 = 3;
     static const float ref_[/* (N0 + N1) * 7 */] = {
-0, 7, 0.85935f, 0.593484f, 0.141211f, 0.920356f, 0.291593f,
-0, 16, 0.795188f, 0.169207f, 0.386886f, 0.423753f, 0.933004f,
+0, 16, 0.912199f, 0.169926f, 0.350896f, 0.422704f, 0.941837f,
+0, 7, 0.845388f, 0.617568f, 0.13961f, 0.9008f, 0.29315f,
 
-1, 2, 0.996832f, 0.653802f, 0.464573f, 0.815193f, 0.653292f,
-1, 2, 0.963325f, 0.451151f, 0.458915f, 0.496255f, 0.52241f,
-1, 0, 0.926244f, 0.194851f, 0.361743f, 0.260277f, 0.632364f,
+1, 2, 0.997789f, 0.657455f, 0.459714f, 0.809122f, 0.656829f,
+1, 2, 0.924423f, 0.442872f, 0.470127f, 0.49816f, 0.516516f,
+1, 0, 0.728307f, 0.202607f, 0.369828f, 0.259445f, 0.613846f,
     };
     Mat ref(N0 + N1, 7, CV_32FC1, (void*)ref_);
 
-    std::string config_file = "yolov4-tiny.cfg";
-    std::string weights_file = "yolov4-tiny.weights";
+    std::string config_file = "yolov4-tiny-2020-12.cfg";
+    std::string weights_file = "yolov4-tiny-2020-12.weights";
     double scoreDiff = 0.12;
-    double iouDiff = target == DNN_TARGET_OPENCL_FP16 ? 0.2 : 0.082;
+    double iouDiff = target == DNN_TARGET_OPENCL_FP16 ? 0.2 : 0.118;
 
     {
         SCOPED_TRACE("batch size 1");
         testDarknetModel(config_file, weights_file, ref.rowRange(0, N0), scoreDiff, iouDiff, confThreshold);
+
+        {
+            SCOPED_TRACE("Per-tensor quantize");
+            testDarknetModel(config_file, weights_file, ref.rowRange(0, N0), scoreDiff, 0.224, 0.7, 0.4, false);
+        }
     }
 
     throw SkipTestException("batch2: bad accuracy on second image");

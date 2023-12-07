@@ -53,7 +53,7 @@ struct SimilarWith
     T value;
     float theta_eps;
     float rho_eps;
-    SimilarWith<T>(T val, float e, float r_e): value(val), theta_eps(e), rho_eps(r_e) { };
+    SimilarWith(T val, float e, float r_e): value(val), theta_eps(e), rho_eps(r_e) { }
     bool operator()(const T& other);
 };
 
@@ -327,6 +327,17 @@ TEST(HoughLinesPointSet, regression_21029)
     );
 
     EXPECT_TRUE(lines.empty());
+}
+
+TEST(HoughLines, regression_21983)
+{
+    Mat img(200, 200, CV_8UC1, Scalar(0));
+    line(img, Point(0, 100), Point(100, 100), Scalar(255));
+    std::vector<Vec2f> lines;
+    HoughLines(img, lines, 1, CV_PI/180, 90, 0, 0, 0.001, 1.58);
+    ASSERT_EQ(lines.size(), 1U);
+    EXPECT_EQ(lines[0][0], 100);
+    EXPECT_NEAR(lines[0][1], 1.57179642, 1e-4);
 }
 
 INSTANTIATE_TEST_CASE_P( ImgProc, StandartHoughLinesTest, testing::Combine(testing::Values( "shared/pic5.png", "../stitching/a1.png" ),

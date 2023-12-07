@@ -173,7 +173,7 @@ namespace magazine
     // without utilizing magazine at all
     void GAPI_EXPORTS bindInArg (Mag& mag, const RcDesc &rc, const GRunArg  &arg, HandleRMat handleRMat = HandleRMat::BIND);
 
-    // Extracts a memory object reference fro GRunArgP, stores it in appropriate slot in a magazine
+    // Extracts a memory object reference from GRunArgP, stores it in appropriate slot in a magazine
     // Note on RMat handling from bindInArg above is also applied here
     void GAPI_EXPORTS bindOutArg(Mag& mag, const RcDesc &rc, const GRunArgP &arg, HandleRMat handleRMat = HandleRMat::BIND);
 
@@ -225,6 +225,12 @@ inline void convertInt64ToInt32(const int64_t* src, int* dst, size_t size)
 {
     std::transform(src, src + size, dst,
                    [](int64_t el) { return static_cast<int>(el); });
+}
+
+inline void convertInt32ToInt64(const int* src, int64_t* dst, size_t size)
+{
+    std::transform(src, src + size, dst,
+                   [](int el) { return static_cast<int64_t>(el); });
 }
 
 }} // cv::gimpl

@@ -15,6 +15,7 @@ Implementation of padding layer, which adds paddings to input blob.
 #include "../op_halide.hpp"
 #include "../op_inf_engine.hpp"
 #include "../ie_ngraph.hpp"
+#include "../op_cann.hpp"
 
 #include <vector>
 
@@ -102,10 +103,10 @@ public:
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
 #ifdef HAVE_INF_ENGINE
-        if (backendId == DNN_BACKEND_INFERENCE_ENGINE_NN_BUILDER_2019 || backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+        if (backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
         {
             bool isMyriad = preferableTarget == DNN_TARGET_MYRIAD || preferableTarget == DNN_TARGET_HDDL;
-            if (INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2019R1) && isMyriad)
+            if (isMyriad)
                 return dstRanges.size() == 4 && paddings[0].first == 0 && paddings[0].second == 0;
 
             return (dstRanges.size() <= 4 || !isArmComputePlugin());
@@ -113,7 +114,8 @@ public:
 #endif
         return backendId == DNN_BACKEND_OPENCV ||
                backendId == DNN_BACKEND_CUDA ||
-               (backendId == DNN_BACKEND_HALIDE && haveHalide() && dstRanges.size() == 4);
+               (backendId == DNN_BACKEND_HALIDE && haveHalide() && dstRanges.size() == 4) ||
+               backendId == DNN_BACKEND_CANN;
     }
 
     void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE
@@ -219,28 +221,49 @@ public:
         return Ptr<BackendNode>();
     }
 
-#ifdef HAVE_DNN_IE_NN_BUILDER_2019
-    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
+#ifdef HAVE_CANN
+    virtual Ptr<BackendNode> initCann(const std::vector<Ptr<BackendWrapper> > &inputs,
+                                      const std::vector<Ptr<BackendWrapper> > &outputs,
+                                      const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
     {
-        InferenceEngine::Builder::Layer ieLayer(name);
-        ieLayer.setName(name);
-        ieLayer.setType("Pad");
+        auto x = inputs[0].dynamicCast<CannBackendWrapper>();
 
-        std::vector<int> begins(paddings.size(), 0), ends(paddings.size(), 0);
-        for (int i = 0; i < paddings.size(); ++i)
+        // create operator
+        auto op = std::make_shared<ge::op::PadV3>(name);
+
+        // set attributes
+        op->set_attr_mode(paddingType.c_str());
+
+        // set inputs
+        // set inputs : x
+        auto op_x = nodes[0].dynamicCast<CannBackendNode>()->getOp();
+        op->set_input_x_by_name(*op_x, x->name.c_str());
+        auto x_desc = x->getTensorDesc();
+        op->update_input_desc_x(*x_desc);
+        // set inputs : paddings
+        std::vector<int> pads;
+        for (int i = 0; i < paddings.size(); i++)
         {
-            begins[i] = paddings[i].first;
-            ends[i] = paddings[i].second;
+            pads.push_back(paddings[i].first);
+            pads.push_back(paddings[i].second);
         }
-        ieLayer.getParameters()["pads_begin"] = begins;
-        ieLayer.getParameters()["pads_end"] = ends;
-        ieLayer.getParameters()["pad_mode"] = paddingType;
-        if (paddingType == "constant")
-            ieLayer.getParameters()["pad_value"] = paddingValue;
+        std::vector<int> pads_shape{(int)pads.size()};
+        Mat paddings_mat(pads_shape, CV_32S, &pads[0]);
+        auto op_const_paddings = std::make_shared<CannConstOp>(paddings_mat.data, paddings_mat.type(), pads_shape, cv::format("%s_paddings", name.c_str()));
+        op->set_input_paddings(*(op_const_paddings->getOp()));
+        op->update_input_desc_paddings(*(op_const_paddings->getTensorDesc()));
+        // set inputs : constant_values
+        std::vector<int> constant_values_shape{1};
+        Mat constant_values_mat(1, 1, CV_32F, Scalar(paddingValue));
+        auto op_const_constant_values = std::make_shared<CannConstOp>(constant_values_mat.data, constant_values_mat.type(), constant_values_shape, cv::format("%s_constant_values", name.c_str()));
+        op->set_input_constant_values(*(op_const_constant_values->getOp()));
+        op->update_input_desc_constant_values(*(op_const_constant_values->getTensorDesc()));
 
-        ieLayer.setInputPorts(std::vector<InferenceEngine::Port>(1));
-        ieLayer.setOutputPorts(std::vector<InferenceEngine::Port>(1));
-        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+        // set outputs
+        auto output_y_desc = std::make_shared<ge::TensorDesc>(ge::Shape(), ge::FORMAT_NCHW, ge::DT_FLOAT);
+        op->update_output_desc_y(*output_y_desc);
+
+        return Ptr<BackendNode>(new CannBackendNode(op));
     }
 #endif
 

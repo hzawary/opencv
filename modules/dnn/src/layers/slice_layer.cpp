@@ -44,6 +44,7 @@
 #include "../op_cuda.hpp"
 #include "../op_inf_engine.hpp"
 #include "../ie_ngraph.hpp"
+#include "../op_cann.hpp"
 
 #include "layers_common.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
@@ -64,12 +65,60 @@ namespace cv
 namespace dnn
 {
 
-void sliceRangesFromShape(const MatShape& inpShape, int& axis, std::vector<std::vector<cv::Range> >& sliceRanges)
+Range normalizeRange(const Range& input_range, int n)
 {
+    Range range = input_range;
+
+    range.start = std::min(std::max(range.start, -n), n - 1);
+    if (range.start < 0)
+    {
+        range.start += n;
+    }
+
+    range.end = std::min(std::max(range.end, -n), n);
+    if (range.end < 0)
+    {
+        range.end += n;
+    }
+
+    return range;
+}
+
+// TODO: support cv::Range with steps and negative steps to get rid of this transformation
+void tranformForNegSteps(const MatShape& inpShape, std::vector<std::vector<Range> >& sliceRanges, std::vector<std::vector<int> >& sliceSteps)
+{
+    // in case of negative steps,
+    // x of shape [5, 10], x[5:0:-1, 10:1:-3] <=> np.flip(x[1:5:1, 2:10:3], aixs=(0, 1))
+    // new_end_i = start_i + 1 > dim_i ? dim_i : start_i + 1
+    // new_start_i = end + 1
+    // new_start_i = new_end_i - 1 - ((new_end_i - 1 - new_start_i) / abs(step_i)) * abs(step_i)
+    int start, end, new_start, new_end, step;
+    for (int i = 0; i < sliceSteps[0].size(); ++i)
+    {
+        step = sliceSteps[0][i];
+        if (step > 0)
+            continue;
+
+        step = -step;
+        start = sliceRanges[0][i].start;
+        end = sliceRanges[0][i].end;
+        new_end = start >= inpShape[i] ? inpShape[i] : start + 1;
+        new_start = end + 1;
+        new_start = new_end - 1 - ((new_end - 1 - new_start) / step) * step;
+
+        sliceSteps[0][i] = step;
+        sliceRanges[0][i].start = new_start;
+        sliceRanges[0][i].end = new_end;
+    }
+}
+
+std::vector<std::vector<cv::Range> > finalizeSliceRange(const MatShape& inpShape, int& axis,
+                                                        const std::vector<std::vector<cv::Range> >& inputSliceRanges)
+{
+    std::vector<std::vector<cv::Range> > sliceRanges = inputSliceRanges;
     CV_Assert(inpShape.size() > 0);
     bool axisNeg = (axis < 0);
     axis = (axis + static_cast<int>(inpShape.size())) % inpShape.size();
-    int n = inpShape[axis];
 
     for (size_t i = 0; i < sliceRanges.size(); ++i){
         std::vector<Range>& ranges = sliceRanges[i];
@@ -77,16 +126,20 @@ void sliceRangesFromShape(const MatShape& inpShape, int& axis, std::vector<std::
         {
             ranges.insert(ranges.begin(), axis, Range::all());
         }
-        Range& range = ranges.back();
 
-        if (range.start >= 0)
+        for (size_t j = 0; j < ranges.size(); ++j)
         {
-            continue;
-        }
+            int n = inpShape[j];
+            if (n <= 0)
+            {
+                continue;
+            }
 
-        CV_Assert(n != 0);
-        range.start = (n + range.start) % n;
+            ranges[j] = normalizeRange(ranges[j], n);
+        }
     }
+
+    return sliceRanges;
 }
 
 class SliceLayerImpl : public SliceLayer
@@ -124,6 +177,24 @@ public:
             const DictValue &sizesOrEnds = params.has("size") ? params.get("size") : params.get("end");
             CV_Assert(begins.size() == sizesOrEnds.size());
 
+            if (params.has("steps"))
+            {
+                const DictValue &steps = params.get("steps");
+                sliceSteps.resize(1);
+                sliceSteps[0].resize(steps.size());
+
+                for (int i = 0; i < steps.size(); ++i)
+                {
+                    int step = steps.get<int>(i);
+                    CV_Assert(step != 0);
+                    if (step < 0)
+                        neg_step_dims.push_back(i);
+                    if (std::abs(step) > 1)
+                        hasSteps = true;
+                    sliceSteps[0][i] = step;
+                }
+            }
+
             sliceRanges.resize(1);
             sliceRanges[0].resize(begins.size(), Range::all());
             for (int i = 0; i < begins.size(); ++i)
@@ -136,29 +207,16 @@ public:
                 {
                     int size = sizeOrEnd;
                     CV_Assert(size == -1 || size > 0);  // -1 value means range [start, axis_size).
-                    sliceRanges[0][i].end = size > 0 ? (start + size) : -1;  // We'll finalize a negative value later.
+                    sliceRanges[0][i].end = size > 0 ? (start + size) : INT_MAX;  // We'll finalize a negative value later.
                 }
                 else
                 {
                     int end = sizeOrEnd;
-                    CV_Assert(end < 0 || end > start);  // End index is excluded.
+                    if (hasSteps && !neg_step_dims.empty() && sliceSteps[0][i] < 0)
+                        CV_Assert(end < 0 || end != start); // if current step is negative, end < start is allowed.
+                    else
+                        CV_Assert(end < 0 || end > start);  // End index is excluded.
                     sliceRanges[0][i].end = end;  // We'll finalize a negative value later.
-                }
-            }
-
-            if (params.has("steps"))
-            {
-                const DictValue &steps = params.get("steps");
-                sliceSteps.resize(1);
-                sliceSteps[0].resize(steps.size());
-
-                for (int i = 0; i < steps.size(); ++i)
-                {
-                    int step = steps.get<int>(i);
-                    CV_Assert(step >= 1);
-                    if (step > 1)
-                        hasSteps = true;
-                    sliceSteps[0][i] = step;
                 }
             }
         }
@@ -166,20 +224,15 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
-#ifdef HAVE_DNN_IE_NN_BUILDER_2019
-        if (backendId == DNN_BACKEND_INFERENCE_ENGINE_NN_BUILDER_2019)
-            return INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2019R1) &&
-                sliceRanges.size() == 1 && sliceRanges[0].size() == 4 && !hasSteps;
-#endif
-#ifdef HAVE_DNN_NGRAPH
+#ifdef HAVE_INF_ENGINE
         if (backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
-            return sliceRanges.size() == 1 && !hasSteps;
+            return sliceRanges.size() == 1 && !hasSteps && neg_step_dims.empty();
 #endif
 #ifdef HAVE_CUDA
         if (backendId == DNN_BACKEND_CUDA)
-            return !hasSteps;
+            return !hasSteps && neg_step_dims.empty();
 #endif
-        return backendId == DNN_BACKEND_OPENCV;
+        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_CANN;
     }
 
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
@@ -190,9 +243,13 @@ public:
         CV_Assert(inputs.size() == 1);
         MatShape inpShape = inputs[0];
 
+        std::vector<std::vector<int> > sliceSteps_ = sliceSteps;
+        std::vector<std::vector<cv::Range> > sliceRanges_ = sliceRanges;
+        if (hasSteps && !neg_step_dims.empty())
+            tranformForNegSteps(inpShape, sliceRanges_, sliceSteps_);
+
         int axis_rw = axis;
-        std::vector<std::vector<cv::Range> > sliceRanges_rw = sliceRanges;
-        sliceRangesFromShape(inpShape, axis_rw, sliceRanges_rw);
+        std::vector<std::vector<cv::Range> > sliceRanges_rw = finalizeSliceRange(inpShape, axis_rw, sliceRanges_);
 
         if (!sliceRanges_rw.empty())
         {
@@ -203,10 +260,10 @@ public:
                 for (int j = 0; j < sliceRanges_rw[i].size(); ++j)
                 {
                     if (shapesInitialized || inpShape[j] > 0)
-                        outputs[i][j] = normalize_axis_range(sliceRanges_rw[i][j], inpShape[j]).size();
+                        outputs[i][j] = normalizeRange(sliceRanges_rw[i][j], inpShape[j]).size();
 
-                    if (!sliceSteps.empty() && (i < sliceSteps.size()) && (j < sliceSteps[i].size()) && (sliceSteps[i][j] > 1))
-                        outputs[i][j] = (outputs[i][j] + sliceSteps[i][j] - 1) / sliceSteps[i][j];
+                    if (!sliceSteps_.empty() && (i < sliceSteps_.size()) && (j < sliceSteps_[i].size()) && (sliceSteps_[i][j] > 1))
+                        outputs[i][j] = (outputs[i][j] + sliceSteps_[i][j] - 1) / sliceSteps_[i][j];
                 }
             }
         }
@@ -238,10 +295,12 @@ public:
         outputs_arr.getMatVector(outputs);
 
         CV_Assert(inputs.size() == 1);
-        const MatSize& inpShape = inputs[0].size;
+        MatShape inpShape = shape(inputs[0]);
 
-        sliceRangesFromShape(shape(inputs[0]), axis, sliceRanges);
-        finalSliceRanges = sliceRanges;
+        if (hasSteps && !neg_step_dims.empty())
+            tranformForNegSteps(inpShape, sliceRanges, sliceSteps);
+
+        finalSliceRanges = finalizeSliceRange(shape(inputs[0]), axis, sliceRanges);
 
         if (sliceRanges.empty())
         {
@@ -262,16 +321,16 @@ public:
 
         for (int i = 0; i < outputs.size(); ++i)
         {
-            CV_Assert(finalSliceRanges[i].size() <= inpShape.dims());
+            CV_Assert(finalSliceRanges[i].size() <= inpShape.size());
             // Fill the rest of ranges.
-            for (int j = finalSliceRanges[i].size(); j < inpShape.dims(); ++j)
+            for (int j = finalSliceRanges[i].size(); j < inpShape.size(); ++j)
             {
                 finalSliceRanges[i].push_back(Range::all());
             }
             // Clamp.
             for (int j = 0; j < finalSliceRanges[i].size(); ++j)
             {
-                finalSliceRanges[i][j] = normalize_axis_range(finalSliceRanges[i][j], inpShape[j]);
+                finalSliceRanges[i][j] = normalizeRange(finalSliceRanges[i][j], inpShape[j]);
             }
         }
 
@@ -568,68 +627,131 @@ public:
                     getSliceRecursive<int8_t>(inpMat, inpIdx, finalSliceRanges[i], sliceSteps[i], 0, dimsNum, outputs[i], outIdx);
                 else
                     getSliceRecursive<float>(inpMat, inpIdx, finalSliceRanges[i], sliceSteps[i], 0, dimsNum, outputs[i], outIdx);
+                // flip for negative steps
+                flip(outputs[i]);
             }
         }
     }
 
-
-#ifdef HAVE_DNN_IE_NN_BUILDER_2019
-#if INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2019R1)
-    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >& inputs) CV_OVERRIDE
+#ifdef HAVE_CANN
+    virtual Ptr<BackendNode> initCann(const std::vector<Ptr<BackendWrapper> > &inputs,
+                                      const std::vector<Ptr<BackendWrapper> > &outputs,
+                                      const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
     {
-        CV_Assert_N(finalSliceRanges.size() == 1, inputs.size() <= 2);
+        bool isSplit = sliceRanges.size() > 1;
+        auto x = inputs[0].dynamicCast<CannBackendWrapper>();
 
-        std::vector<size_t> axes, offsets, dims;
-        int from, to, step;
-        int numDims = finalSliceRanges[0].size();
-        if (preferableTarget == DNN_TARGET_MYRIAD || preferableTarget == DNN_TARGET_HDDL)
+        if (isSplit)
         {
-            from = axis;
-            to = numDims;
-            step = 1;
+            // create operator
+            auto op = std::make_shared<ge::op::SplitV>(name);
+
+            // set attr
+            int n_split = static_cast<int>(sliceRanges[0].size());
+            op->set_attr_num_split(n_split);
+
+            // set inputs
+            // set inputs : x
+            auto op_x = nodes[0].dynamicCast<CannBackendNode>()->getOp();
+            op->set_input_x_by_name(*op_x, x->name.c_str());
+            auto desc_x = x->getTensorDesc();
+            op->update_input_desc_x(*desc_x);
+            // set inputs : size_splits
+            std::vector<int> size_splits(n_split);
+            int cnt_split = 0;
+            for (size_t i = 0; i < sliceRanges.size() - 1; ++i)
+            {
+                auto target_range = sliceRanges[i].back();
+                size_splits[i] = target_range.end - target_range.start;
+                cnt_split += size_splits[i];
+            }
+            auto shape_x = desc_x->GetShape().GetDims();
+            CV_CheckGT(shape_x[axis], cnt_split, "DNN/CANN: invalid splits");
+            size_splits[n_split - 1] = shape_x[axis] - cnt_split;
+            std::vector<int> shape_size_splits{(int)size_splits.size()};
+            Mat size_splits_mat(shape_size_splits, CV_32S, size_splits.data());
+            auto op_const_size_splits = std::make_shared<CannConstOp>(size_splits_mat.data, size_splits_mat.type(), shape_size_splits, cv::format("%s_size_splits", name.c_str()));
+            op->set_input_size_splits(*(op_const_size_splits->getOp()));
+            op->update_input_desc_size_splits(*(op_const_size_splits->getTensorDesc()));
+            // set inputs : split_dim
+            Mat split_dim_mat(1, 1, CV_32S, Scalar(axis));
+            std::vector<int> split_dim_shape{1};
+            auto op_const_split_dim = std::make_shared<CannConstOp>(split_dim_mat.data, split_dim_mat.type(), split_dim_shape, cv::format("%s_split_dim", name.c_str()));
+            op->set_input_split_dim(*(op_const_split_dim->getOp()));
+            op->update_input_desc_split_dim(*(op_const_split_dim->getTensorDesc()));
+
+            // set outputs
+            op->create_dynamic_output_y(n_split);
+            for (uint32_t i = 0; i < n_split; ++i)
+            {
+                auto desc_output_y_i = std::make_shared<ge::TensorDesc>(ge::Shape(), ge::FORMAT_NCHW, ge::DT_FLOAT);
+                op->update_dynamic_output_desc_y(i, *desc_output_y_i);
+            }
+
+            return Ptr<BackendNode>(new CannBackendNode(op));
         }
-        else
+
+        // ONNX-Slice
+        CV_CheckEQ(sliceRanges.size(), (size_t)1, "");
+        if (hasSteps)
         {
-            from = numDims - 1;
-            to = axis - 1;
-            step = -1;
+            CV_CheckEQ(sliceSteps.size(), (size_t)1, "DNN/CANN/Slice: no support to multiple slices");
+            CV_CheckEQ(sliceRanges[0].size(), sliceSteps[0].size(), "DNN/CANN/Slice: number of slice ranges does not match number of slice steps");
         }
-        for (int i = from; i != to; i += step)
+
+        const int dims = x->host->dims;
+
+        // create operator
+        auto op = std::make_shared<ge::op::StridedSliceV2>(name);
+
+        // retrieve begins, ends, axes and steps
+        std::vector<int> begins, ends, axes, steps;
+        for (int i = 0; i < sliceRanges[0].size(); i++)
         {
+            begins.push_back(sliceRanges[0][i].start);
+            ends.push_back(sliceRanges[0][i].end);
             axes.push_back(i);
-            offsets.push_back(finalSliceRanges[0][i].start);
-            dims.push_back(finalSliceRanges[0][i].size());
+            if (hasSteps)
+                steps.push_back(sliceSteps[0][i]);
+            else
+                steps.push_back(1); // put 1 by default
         }
+        std::vector<int> shape_{dims};
 
-        InferenceEngine::Builder::Layer ieLayer(name);
-        ieLayer.setName(name);
-        ieLayer.setType("Crop");
-        ieLayer.getParameters()["axis"] = axes;
-        ieLayer.getParameters()["dim"] = dims;
-        ieLayer.getParameters()["offset"] = offsets;
-        ieLayer.setInputPorts(std::vector<InferenceEngine::Port>(2));
-        ieLayer.setOutputPorts(std::vector<InferenceEngine::Port>(1));
+        // set inputs
+        // set inputs : x
+        auto op_x = nodes[0].dynamicCast<CannBackendNode>()->getOp();
+        op->set_input_x_by_name(*op_x, x->name.c_str());
+        auto x_desc = x->getTensorDesc();
+        op->update_input_desc_x(*x_desc);
+        // set inputs : begin
+        Mat begin_mat(shape_, CV_32S, &begins[0]);
+        auto op_const_begin = std::make_shared<CannConstOp>(begin_mat.data, begin_mat.type(), shape_, cv::format("%s_begin", name.c_str()));
+        op->set_input_begin(*(op_const_begin->getOp()));
+        op->update_input_desc_begin(*(op_const_begin->getTensorDesc()));
+        // set inputs : end
+        Mat end_mat(shape_, CV_32S, &ends[0]);
+        auto op_const_end = std::make_shared<CannConstOp>(end_mat.data, end_mat.type(), shape_, cv::format("%s_end", name.c_str()));
+        op->set_input_end(*(op_const_end->getOp()));
+        op->update_input_desc_end(*(op_const_end->getTensorDesc()));
+        // set inputs : axes
+        Mat axes_mat(shape_, CV_32S, &axes[0]);
+        auto op_const_axes = std::make_shared<CannConstOp>(axes_mat.data, axes_mat.type(), shape_, cv::format("%s_axes", name.c_str()));
+        op->set_input_axes(*(op_const_axes->getOp()));
+        op->update_input_desc_axes(*(op_const_axes->getTensorDesc()));
+        // set inputs : strides
+        Mat strides_mat(shape_, CV_32S, &steps[0]);
+        auto op_const_strides = std::make_shared<CannConstOp>(strides_mat.data, strides_mat.type(), shape_, cv::format("%s_strides", name.c_str()));
+        op->set_input_strides(*(op_const_strides->getOp()));
+        op->update_input_desc_strides(*(op_const_strides->getTensorDesc()));
 
-        if (inputs.size() != 2)
-        {
-            std::vector<size_t> outShape(numDims);
-            for (int i = 0; i < numDims; ++i)
-                outShape[i] = finalSliceRanges[0][i].size();
+        // set outputs
+        auto output_desc = std::make_shared<ge::TensorDesc>(ge::Shape(), ge::FORMAT_NCHW, ge::DT_FLOAT);
+        op->update_output_desc_y(*output_desc);
 
-            ieLayer.getInputPorts()[1].setParameter("type", "weights");
-
-            auto shapeSource = InferenceEngine::make_shared_blob<float>({
-                                   InferenceEngine::Precision::FP32, outShape,
-                                   InferenceEngine::Layout::ANY
-                               });
-            shapeSource->allocate();
-            addConstantData("weights", shapeSource, ieLayer);
-        }
-        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+        return Ptr<BackendNode>(new CannBackendNode(op));
     }
 #endif
-#endif
-
 
 #ifdef HAVE_DNN_NGRAPH
     virtual Ptr<BackendNode> initNgraph(const std::vector<Ptr<BackendWrapper> >& inputs,
@@ -637,7 +759,7 @@ public:
     {
         CV_Assert_N(nodes.size() <= 2);
         auto& ieInpNode = nodes[0].dynamicCast<InfEngineNgraphNode>()->node;
-        CV_Assert(finalSliceRanges[0].size() == ieInpNode->get_shape().size());
+        CV_Assert(finalSliceRanges[0].size() == ieInpNode.get_shape().size());
 
         std::vector<int64_t> offsets, dims;
         for (int i = 0; i < finalSliceRanges[0].size(); ++i)
@@ -719,9 +841,15 @@ private:
         }
     }
 
+    void flip(Mat& output) // break if 1d tensor?
+    {
+        for (int i = 0; i < neg_step_dims.size(); ++i)
+                cv::flipND(output, output, neg_step_dims[i]);
+    }
 protected:
     // The actual non-negative values determined from @p sliceRanges depends on input size.
     std::vector<std::vector<Range> > finalSliceRanges;
+    std::vector<int> neg_step_dims;
     bool hasDynamicShapes;
     bool shapesInitialized;
     bool hasSteps;

@@ -74,6 +74,10 @@ if(POLICY CMP0077)
   cmake_policy(SET CMP0077 NEW)  # CMake 3.13+: option() honors normal variables.
 endif()
 
+if(POLICY CMP0146)
+  cmake_policy(SET CMP0146 OLD)  # CMake 3.27+: use CMake FindCUDA if available.
+endif()
+
 #
 # Configure OpenCV CMake hooks
 #
@@ -240,10 +244,12 @@ OCV_OPTION(WITH_1394 "Include IEEE1394 support" ON
 OCV_OPTION(WITH_AVFOUNDATION "Use AVFoundation for Video I/O (iOS/Mac)" ON
   VISIBLE_IF APPLE
   VERIFY HAVE_AVFOUNDATION)
+OCV_OPTION(WITH_AVIF "Enable AVIF support" OFF
+  VERIFY HAVE_AVIF)
 OCV_OPTION(WITH_CAP_IOS "Enable iOS video capture" ON
   VISIBLE_IF IOS
   VERIFY HAVE_CAP_IOS)
-OCV_OPTION(WITH_CAROTENE "Use NVidia carotene acceleration library for ARM platform" ON
+OCV_OPTION(WITH_CAROTENE "Use NVidia carotene acceleration library for ARM platform" (NOT CV_DISABLE_OPTIMIZATION)
   VISIBLE_IF (ARM OR AARCH64) AND NOT IOS)
 OCV_OPTION(WITH_CPUFEATURES "Use cpufeatures Android library" ON
   VISIBLE_IF ANDROID
@@ -263,9 +269,12 @@ OCV_OPTION(WITH_CUBLAS "Include NVidia Cuda Basic Linear Algebra Subprograms (BL
 OCV_OPTION(WITH_CUDNN "Include NVIDIA CUDA Deep Neural Network (cuDNN) library support" WITH_CUDA
   VISIBLE_IF WITH_CUDA
   VERIFY HAVE_CUDNN)
-OCV_OPTION(WITH_NVCUVID "Include NVidia Video Decoding library support" OFF  # disabled, details: https://github.com/opencv/opencv/issues/14850
+OCV_OPTION(WITH_NVCUVID "Include NVidia Video Decoding library support" ON
   VISIBLE_IF WITH_CUDA
   VERIFY HAVE_NVCUVID)
+OCV_OPTION(WITH_NVCUVENC "Include NVidia Video Encoding library support" ON
+  VISIBLE_IF WITH_CUDA
+  VERIFY HAVE_NVCUVENC)
 OCV_OPTION(WITH_EIGEN "Include Eigen2/Eigen3 support" (NOT CV_DISABLE_OPTIMIZATION AND NOT CMAKE_CROSSCOMPILING)
   VISIBLE_IF NOT WINRT
   VERIFY HAVE_EIGEN)
@@ -281,6 +290,9 @@ OCV_OPTION(WITH_GTK "Include GTK support" ON
 OCV_OPTION(WITH_GTK_2_X "Use GTK version 2" OFF
   VISIBLE_IF UNIX AND NOT APPLE AND NOT ANDROID
   VERIFY HAVE_GTK AND NOT HAVE_GTK3)
+OCV_OPTION(WITH_WAYLAND "Include Wayland support" OFF
+        VISIBLE_IF UNIX AND NOT APPLE AND NOT ANDROID
+        VERIFY HAVE_WAYLAND)
 OCV_OPTION(WITH_IPP "Include Intel IPP support" (NOT MINGW AND NOT CV_DISABLE_OPTIMIZATION)
   VISIBLE_IF (X86_64 OR X86) AND NOT WINRT AND NOT IOS
   VERIFY HAVE_IPP)
@@ -290,12 +302,10 @@ OCV_OPTION(WITH_HALIDE "Include Halide support" OFF
 OCV_OPTION(WITH_VULKAN "Include Vulkan support" OFF
   VISIBLE_IF TRUE
   VERIFY HAVE_VULKAN)
-OCV_OPTION(WITH_INF_ENGINE "Include Intel Inference Engine support" OFF
+# replacement for deprecated options: WITH_INF_ENGINE, WITH_NGRAPH
+OCV_OPTION(WITH_OPENVINO "Include Intel OpenVINO toolkit support" (WITH_INF_ENGINE)
   VISIBLE_IF TRUE
-  VERIFY INF_ENGINE_TARGET)
-OCV_OPTION(WITH_NGRAPH "Include nGraph support" WITH_INF_ENGINE
-  VISIBLE_IF TRUE
-  VERIFY TARGET ngraph::ngraph)
+  VERIFY TARGET ocv.3rdparty.openvino)
 OCV_OPTION(WITH_WEBNN "Include WebNN support" OFF
   VISIBLE_IF TRUE
   VERIFY HAVE_WEBNN)
@@ -329,6 +339,9 @@ OCV_OPTION(WITH_OPENNI2 "Include OpenNI2 support" OFF
 OCV_OPTION(WITH_PNG "Include PNG support" ON
   VISIBLE_IF TRUE
   VERIFY HAVE_PNG)
+OCV_OPTION(WITH_SPNG "Include SPNG support" OFF
+  VISIBLE_IF TRUE
+  VERIFY HAVE_SPNG)
 OCV_OPTION(WITH_GDCM "Include DICOM support" OFF
   VISIBLE_IF TRUE
   VERIFY HAVE_GDCM)
@@ -398,6 +411,9 @@ OCV_OPTION(WITH_OPENCLAMDBLAS "Include AMD OpenCL BLAS library support" ON
 OCV_OPTION(WITH_DIRECTX "Include DirectX support" ON
   VISIBLE_IF WIN32 AND NOT WINRT
   VERIFY HAVE_DIRECTX)
+OCV_OPTION(WITH_DIRECTML "Include DirectML support" ON
+  VISIBLE_IF WIN32 AND NOT WINRT
+  VERIFY HAVE_DIRECTML)
 OCV_OPTION(WITH_OPENCL_D3D11_NV "Include NVIDIA OpenCL D3D11 support" WITH_DIRECTX
   VISIBLE_IF WIN32 AND NOT WINRT
   VERIFY HAVE_OPENCL_D3D11_NV)
@@ -440,7 +456,7 @@ OCV_OPTION(WITH_IMGCODEC_PXM "Include PNM (PBM,PGM,PPM) and PAM formats support"
 OCV_OPTION(WITH_IMGCODEC_PFM "Include PFM formats support" ON
   VISIBLE_IF TRUE
   VERIFY HAVE_IMGCODEC_PFM)
-OCV_OPTION(WITH_QUIRC "Include library QR-code decoding" ON
+OCV_OPTION(WITH_QUIRC "Include library QR-code decoding" OFF
   VISIBLE_IF TRUE
   VERIFY HAVE_QUIRC)
 OCV_OPTION(WITH_ANDROID_MEDIANDK "Use Android Media NDK for Video I/O (Android)" (ANDROID_NATIVE_API_LEVEL GREATER 20)
@@ -449,12 +465,21 @@ OCV_OPTION(WITH_ANDROID_MEDIANDK "Use Android Media NDK for Video I/O (Android)"
 OCV_OPTION(WITH_ANDROID_NATIVE_CAMERA "Use Android NDK for Camera I/O (Android)" (ANDROID_NATIVE_API_LEVEL GREATER 23)
   VISIBLE_IF ANDROID
   VERIFY HAVE_ANDROID_NATIVE_CAMERA)
-OCV_OPTION(WITH_TENGINE "Include Arm Inference Tengine support" OFF
-  VISIBLE_IF (ARM OR AARCH64) AND (UNIX OR ANDROID) AND NOT IOS
-  VERIFY HAVE_TENGINE)
 OCV_OPTION(WITH_ONNX "Include Microsoft ONNX Runtime support" OFF
   VISIBLE_IF TRUE
   VERIFY HAVE_ONNX)
+OCV_OPTION(WITH_TIMVX "Include Tim-VX support" OFF
+  VISIBLE_IF TRUE
+  VERIFY HAVE_TIMVX)
+OCV_OPTION(WITH_OBSENSOR "Include obsensor support (Orbbec RGB-D modules: Astra+/Femto)" ON
+  VISIBLE_IF (WIN32 AND NOT ARM AND NOT WINRT AND NOT MINGW) OR ( UNIX AND NOT APPLE AND NOT ANDROID)
+  VERIFY HAVE_OBSENSOR)
+OCV_OPTION(WITH_CANN "Include CANN support" OFF
+  VISIBLE_IF TRUE
+  VERIFY HAVE_CANN)
+OCV_OPTION(WITH_FLATBUFFERS "Include Flatbuffers support (required by DNN/TFLite importer)" ON
+  VISIBLE_IF TRUE
+  VERIFY HAVE_FLATBUFFERS)
 
 # OpenCV build components
 # ===================================================
@@ -492,6 +517,7 @@ OCV_OPTION(INSTALL_TESTS            "Install accuracy and performance test binar
 # ===================================================
 OCV_OPTION(ENABLE_CCACHE              "Use ccache"                                               (UNIX AND (CMAKE_GENERATOR MATCHES "Makefile" OR CMAKE_GENERATOR MATCHES "Ninja" OR CMAKE_GENERATOR MATCHES "Xcode")) )
 OCV_OPTION(ENABLE_PRECOMPILED_HEADERS "Use precompiled headers"                                  MSVC IF (MSVC OR (NOT IOS AND NOT CMAKE_CROSSCOMPILING) ) )
+OCV_OPTION(ENABLE_DELAYLOAD           "Enable delayed loading of OpenCV DLLs"                    OFF VISIBLE_IF MSVC AND BUILD_SHARED_LIBS)
 OCV_OPTION(ENABLE_SOLUTION_FOLDERS    "Solution folder in Visual Studio or in other IDEs"        (MSVC_IDE OR CMAKE_GENERATOR MATCHES Xcode) )
 OCV_OPTION(ENABLE_PROFILING           "Enable profiling in the GCC compiler (Add flags: -g -pg)" OFF  IF CV_GCC )
 OCV_OPTION(ENABLE_COVERAGE            "Enable coverage collection with  GCov"                    OFF  IF CV_GCC )
@@ -634,7 +660,7 @@ ocv_cmake_hook(POST_COMPILER_OPTIONS)
 # ----------------------------------------------------------------------------
 #       CHECK FOR SYSTEM LIBRARIES, OPTIONS, ETC..
 # ----------------------------------------------------------------------------
-if(UNIX)
+if(UNIX OR MINGW)
   if(NOT APPLE_FRAMEWORK OR OPENCV_ENABLE_PKG_CONFIG)
     if(CMAKE_CROSSCOMPILING AND NOT DEFINED ENV{PKG_CONFIG_LIBDIR} AND NOT DEFINED ENV{PKG_CONFIG_SYSROOT_DIR}
         AND NOT OPENCV_ENABLE_PKG_CONFIG
@@ -666,6 +692,8 @@ if(UNIX)
       # no need to link to system libs with emscripten
     elseif(QNXNTO)
       set(OPENCV_LINKER_LIBS ${OPENCV_LINKER_LIBS} m)
+    elseif(MINGW)
+      set(OPENCV_LINKER_LIBS ${OPENCV_LINKER_LIBS} pthread)
     else()
       set(OPENCV_LINKER_LIBS ${OPENCV_LINKER_LIBS} dl m pthread rt)
     endif()
@@ -732,8 +760,12 @@ include(cmake/OpenCVFindLibsVideo.cmake)
 include(cmake/OpenCVFindLibsPerf.cmake)
 include(cmake/OpenCVFindLAPACK.cmake)
 include(cmake/OpenCVFindProtobuf.cmake)
-if(WITH_TENGINE)
-  include(cmake/OpenCVFindTengine.cmake)
+include(cmake/OpenCVDetectFlatbuffers.cmake)
+if(WITH_TIMVX)
+  include(cmake/OpenCVFindTIMVX.cmake)
+endif()
+if(WITH_CANN)
+  include(cmake/OpenCVFindCANN.cmake)
 endif()
 
 # ----------------------------------------------------------------------------
@@ -746,6 +778,15 @@ if(BUILD_JAVA)
     include(cmake/android/OpenCVDetectAndroidSDK.cmake)
   else()
     include(cmake/OpenCVDetectApacheAnt.cmake)
+    if(ANT_EXECUTABLE AND NOT OPENCV_JAVA_IGNORE_ANT)
+      ocv_update(OPENCV_JAVA_SDK_BUILD_TYPE "ANT")
+    elseif(NOT ANDROID)
+      find_package(Java)
+      if(Java_FOUND)
+        include(UseJava)
+        ocv_update(OPENCV_JAVA_SDK_BUILD_TYPE "JAVA")
+      endif()
+    endif()
     find_package(JNI)
   endif()
 endif()
@@ -802,13 +843,17 @@ if(WITH_WEBNN)
 endif()
 
 # --- Inference Engine ---
-if(WITH_INF_ENGINE)
+if(WITH_INF_ENGINE OR WITH_OPENVINO)
   include(cmake/OpenCVDetectInferenceEngine.cmake)
 endif()
 
 # --- DirectX ---
 if(WITH_DIRECTX)
   include(cmake/OpenCVDetectDirectX.cmake)
+endif()
+# --- DirectML ---
+if(WITH_DIRECTML)
+  include(cmake/OpenCVDetectDirectML.cmake)
 endif()
 
 if(WITH_VTK)
@@ -888,7 +933,7 @@ foreach(hal ${OpenCV_HAL})
     endif()
   endif()
 endforeach()
-configure_file("${OpenCV_SOURCE_DIR}/cmake/templates/custom_hal.hpp.in" "${CMAKE_BINARY_DIR}/custom_hal.hpp" @ONLY)
+configure_file("${OpenCV_SOURCE_DIR}/cmake/templates/custom_hal.hpp.in" "${OPENCV_CONFIG_FILE_INCLUDE_DIR}/custom_hal.hpp" @ONLY)
 unset(_hal_includes)
 
 
@@ -940,10 +985,6 @@ endif()
 # examples
 if(BUILD_EXAMPLES OR BUILD_ANDROID_EXAMPLES OR INSTALL_ANDROID_EXAMPLES OR INSTALL_PYTHON_EXAMPLES OR INSTALL_C_EXAMPLES)
   add_subdirectory(samples)
-endif()
-
-if(ANDROID)
-  add_subdirectory(platforms/android/service)
 endif()
 
 # ----------------------------------------------------------------------------
@@ -1256,6 +1297,24 @@ endif(WIN32)
 status("")
 status("  GUI: " "${OPENCV_HIGHGUI_BUILTIN_BACKEND}")
 
+if(WITH_WAYLAND OR HAVE_WAYLAND)
+  if(HAVE_WAYLAND_CLIENT)
+    status("    Wayland Client:" "YES (ver ${WAYLAND_CLIENT_VERSION})")
+  endif()
+  if(HAVE_WAYLAND_CURSOR)
+    status("    Wayland Cursor:" "YES (ver ${WAYLAND_CURSOR_VERSION})")
+  endif()
+  if(HAVE_WAYLAND_PROTOCOL)
+    status("    Wayland Protocol:" "YES (ver ${WAYLAND_PROTOCOL_VERSION})")
+  endif()
+  if(HAVE_WAYLAND_EGL)
+    status("    Wayland EGL:" "YES (ver ${WAYLAND_EGL_VERSION})")
+  endif()
+  if(HAVE_XKBCOMMON)
+    status("    Xkbcommon:" "YES (ver ${XKBCOMMON_VERSION})")
+  endif()
+endif()
+
 if(WITH_QT OR HAVE_QT)
   if(HAVE_QT)
     status("    QT:" "YES (ver ${QT_VERSION_MAJOR}.${QT_VERSION_MINOR}.${QT_VERSION_PATCH} ${QT_EDITION})")
@@ -1313,6 +1372,16 @@ if(WITH_JPEG OR HAVE_JPEG)
     status("    JPEG:" NO)
   elseif(BUILD_JPEG)
     status("    JPEG:" "build-${JPEG_LIBRARY} (ver ${JPEG_LIB_VERSION})")
+    if(ENABLE_LIBJPEG_TURBO_SIMD)
+      status("      SIMD Support Request:" "YES")
+      if(HAVE_LIBJPEG_TURBO_SIMD)
+        status("      SIMD Support:" "YES")
+      else()
+        status("      SIMD Support:" "NO")
+      endif()
+    else()
+      status("      SIMD Support Request:" "NO")
+    endif()
   else()
     status("    JPEG:" "${JPEG_LIBRARY} (ver ${JPEG_LIB_VERSION})")
   endif()
@@ -1322,8 +1391,20 @@ if(WITH_WEBP OR HAVE_WEBP)
   status("    WEBP:" WEBP_FOUND THEN "${WEBP_LIBRARY} (ver ${WEBP_VERSION})" ELSE "build (ver ${WEBP_VERSION})")
 endif()
 
-if(WITH_PNG OR HAVE_PNG)
-  status("    PNG:"  PNG_FOUND  THEN "${PNG_LIBRARY} (ver ${PNG_VERSION})" ELSE "build (ver ${PNG_VERSION})")
+if(WITH_AVIF OR HAVE_AVIF)
+  if(AVIF_VERSION)
+    status("    AVIF:" AVIF_FOUND THEN "${AVIF_LIBRARY} (ver ${AVIF_VERSION})" ELSE "NO")
+  else()
+    status("    AVIF:" AVIF_FOUND THEN "${AVIF_LIBRARY}" ELSE "NO")
+  endif()
+endif()
+
+if(WITH_PNG OR HAVE_PNG OR WITH_SPNG)
+  if(WITH_SPNG)
+    status("    PNG:" "build-${SPNG_LIBRARY} (ver ${SPNG_VERSION})")
+  else()
+    status("    PNG:"  PNG_FOUND  THEN "${PNG_LIBRARY} (ver ${PNG_VERSION})" ELSE "build (ver ${PNG_VERSION})")
+  endif()
 endif()
 
 if(WITH_TIFF OR HAVE_TIFF)
@@ -1394,6 +1475,9 @@ if(WITH_FFMPEG OR HAVE_FFMPEG)
   status("      avutil:"       FFMPEG_libavutil_VERSION     THEN "YES (${FFMPEG_libavutil_VERSION})"     ELSE NO)
   status("      swscale:"      FFMPEG_libswscale_VERSION    THEN "YES (${FFMPEG_libswscale_VERSION})"    ELSE NO)
   status("      avresample:"   FFMPEG_libavresample_VERSION THEN "YES (${FFMPEG_libavresample_VERSION})" ELSE NO)
+  if(OPENCV_FFMPEG_ENABLE_LIBAVDEVICE)
+    status("      avdevice:"     FFMPEG_libavdevice_VERSION   THEN "YES (${FFMPEG_libavdevice_VERSION})"   ELSE NO)
+  endif()
 endif()
 
 if(WITH_GSTREAMER OR HAVE_GSTREAMER)
@@ -1525,10 +1609,6 @@ if(WITH_VA OR HAVE_VA)
   status("    VA:"            HAVE_VA          THEN "YES" ELSE NO)
 endif()
 
-if(WITH_TENGINE OR HAVE_TENGINE)
-  status("    Tengine:"      HAVE_TENGINE     THEN "YES (${TENGINE_LIBRARIES})" ELSE NO)
-endif()
-
 if(WITH_LAPACK OR HAVE_LAPACK)
   status("    Lapack:"      HAVE_LAPACK     THEN "YES (${LAPACK_LIBRARIES})" ELSE NO)
 endif()
@@ -1537,56 +1617,66 @@ if(WITH_HALIDE OR HAVE_HALIDE)
   status("    Halide:"     HAVE_HALIDE      THEN "YES (${HALIDE_LIBRARIES} ${HALIDE_INCLUDE_DIRS})" ELSE NO)
 endif()
 
-if(WITH_INF_ENGINE OR INF_ENGINE_TARGET)
-  if(INF_ENGINE_TARGET)
-    list(GET INF_ENGINE_TARGET 0 ie_target)
-    set(__msg "YES (${INF_ENGINE_RELEASE} / ${INF_ENGINE_VERSION})")
-    ocv_get_imported_target(ie_target "${ie_target}")
-    get_target_property(_lib ${ie_target} IMPORTED_LOCATION)
-    get_target_property(_lib_imp_rel ${ie_target} IMPORTED_IMPLIB_RELEASE)
-    get_target_property(_lib_imp_dbg ${ie_target} IMPORTED_IMPLIB_DEBUG)
-    get_target_property(_lib_rel ${ie_target} IMPORTED_LOCATION_RELEASE)
-    get_target_property(_lib_dbg ${ie_target} IMPORTED_LOCATION_DEBUG)
-    ocv_build_features_string(_lib
-      IF _lib THEN "${_lib}"
-      IF _lib_imp_rel AND _lib_imp_dbg THEN "${_lib_imp_rel} / ${_lib_imp_dbg}"
-      IF _lib_rel AND _lib_dbg THEN "${_lib_rel} / ${_lib_dbg}"
-      IF _lib_rel  THEN "${_lib_rel}"
-      IF _lib_dbg  THEN "${_lib_dbg}"
-      ELSE "unknown"
-    )
-    get_target_property(_inc ${ie_target} INTERFACE_INCLUDE_DIRECTORIES)
-    status("    Inference Engine:" "${__msg}")
-    status("        * libs:" "${_lib}")
-    status("        * includes:" "${_inc}")
-  else()
-    status("    Inference Engine:"     "NO")
+if(HAVE_OPENVINO
+    OR (WITH_OPENVINO AND NOT WITH_INF_ENGINE AND NOT INF_ENGINE_TARGET)
+)
+  status("    OpenVINO:" TARGET openvino::runtime THEN "YES (${OpenVINO_VERSION})" ELSE "NO")
+else()
+  if(WITH_INF_ENGINE OR INF_ENGINE_TARGET)
+    if(INF_ENGINE_TARGET)
+      list(GET INF_ENGINE_TARGET 0 ie_target)
+      set(__msg "YES (${INF_ENGINE_RELEASE} / ${INF_ENGINE_VERSION})")
+      ocv_get_imported_target(ie_target "${ie_target}")
+      get_target_property(_lib ${ie_target} IMPORTED_LOCATION)
+      get_target_property(_lib_imp_rel ${ie_target} IMPORTED_IMPLIB_RELEASE)
+      get_target_property(_lib_imp_dbg ${ie_target} IMPORTED_IMPLIB_DEBUG)
+      get_target_property(_lib_rel ${ie_target} IMPORTED_LOCATION_RELEASE)
+      get_target_property(_lib_dbg ${ie_target} IMPORTED_LOCATION_DEBUG)
+      ocv_build_features_string(_lib
+        IF _lib THEN "${_lib}"
+        IF _lib_imp_rel AND _lib_imp_dbg THEN "${_lib_imp_rel} / ${_lib_imp_dbg}"
+        IF _lib_rel AND _lib_dbg THEN "${_lib_rel} / ${_lib_dbg}"
+        IF _lib_rel  THEN "${_lib_rel}"
+        IF _lib_dbg  THEN "${_lib_dbg}"
+        ELSE "unknown"
+      )
+      get_target_property(_inc ${ie_target} INTERFACE_INCLUDE_DIRECTORIES)
+      status("    Inference Engine:" "${__msg}")
+      status("        * libs:" "${_lib}")
+      status("        * includes:" "${_inc}")
+    else()
+      status("    Inference Engine:"     "NO")
+    endif()
+  endif()
+  if(WITH_NGRAPH OR HAVE_NGRAPH)
+    if(HAVE_NGRAPH)
+      ocv_get_imported_target(__target ngraph::ngraph)
+      set(__msg "YES (${ngraph_VERSION})")
+      get_target_property(_lib ${__target} IMPORTED_LOCATION)
+      get_target_property(_lib_imp_rel ${__target} IMPORTED_IMPLIB_RELEASE)
+      get_target_property(_lib_imp_dbg ${__target} IMPORTED_IMPLIB_DEBUG)
+      get_target_property(_lib_rel ${__target} IMPORTED_LOCATION_RELEASE)
+      get_target_property(_lib_dbg ${__target} IMPORTED_LOCATION_DEBUG)
+      ocv_build_features_string(_lib
+        IF _lib THEN "${_lib}"
+        IF _lib_imp_rel AND _lib_imp_dbg THEN "${_lib_imp_rel} / ${_lib_imp_dbg}"
+        IF _lib_rel AND _lib_dbg THEN "${_lib_rel} / ${_lib_dbg}"
+        IF _lib_rel  THEN "${_lib_rel}"
+        IF _lib_dbg  THEN "${_lib_dbg}"
+        ELSE "unknown"
+      )
+      get_target_property(_inc ${__target} INTERFACE_INCLUDE_DIRECTORIES)
+      status("    nGraph:" "${__msg}")
+      status("        * libs:" "${_lib}")
+      status("        * includes:" "${_inc}")
+    else()
+      status("    nGraph:"     "NO")
+    endif()
   endif()
 endif()
-if(WITH_NGRAPH OR HAVE_NGRAPH)
-  if(HAVE_NGRAPH)
-    ocv_get_imported_target(__target ngraph::ngraph)
-    set(__msg "YES (${ngraph_VERSION})")
-    get_target_property(_lib ${__target} IMPORTED_LOCATION)
-    get_target_property(_lib_imp_rel ${__target} IMPORTED_IMPLIB_RELEASE)
-    get_target_property(_lib_imp_dbg ${__target} IMPORTED_IMPLIB_DEBUG)
-    get_target_property(_lib_rel ${__target} IMPORTED_LOCATION_RELEASE)
-    get_target_property(_lib_dbg ${__target} IMPORTED_LOCATION_DEBUG)
-    ocv_build_features_string(_lib
-      IF _lib THEN "${_lib}"
-      IF _lib_imp_rel AND _lib_imp_dbg THEN "${_lib_imp_rel} / ${_lib_imp_dbg}"
-      IF _lib_rel AND _lib_dbg THEN "${_lib_rel} / ${_lib_dbg}"
-      IF _lib_rel  THEN "${_lib_rel}"
-      IF _lib_dbg  THEN "${_lib_dbg}"
-      ELSE "unknown"
-    )
-    get_target_property(_inc ${__target} INTERFACE_INCLUDE_DIRECTORIES)
-    status("    nGraph:" "${__msg}")
-    status("        * libs:" "${_lib}")
-    status("        * includes:" "${_inc}")
-  else()
-    status("    nGraph:"     "NO")
-  endif()
+
+if(BUILD_opencv_dnn AND OPENCV_DNN_BACKEND_DEFAULT)
+    status("    Default DNN backend:" ${OPENCV_DNN_BACKEND_DEFAULT})
 endif()
 
 if(WITH_EIGEN OR HAVE_EIGEN)
@@ -1608,6 +1698,7 @@ if(WITH_CUDA OR HAVE_CUDA)
     IF HAVE_CUFFT THEN "CUFFT"
     IF HAVE_CUBLAS THEN "CUBLAS"
     IF HAVE_NVCUVID THEN "NVCUVID"
+    IF HAVE_NVCUVENC THEN "NVCUVENC"
     IF CUDA_FAST_MATH THEN "FAST_MATH"
     ELSE "no extra features")
   status("")
@@ -1641,6 +1732,16 @@ if(WITH_WEBNN OR HAVE_WEBNN)
   endif()
 endif()
 
+if(WITH_TIMVX)
+  status("")
+  status("  Tim-VX:"     HAVE_TIMVX THEN "YES" ELSE "NO")
+  if(HAVE_TIMVX)
+    status("    Include path"  TIMVX_INCLUDE_DIR THEN "${TIMVX_INCLUDE_DIR}" ELSE "NO")
+    status("    Link libraries:" TIMVX_LIBRARY THEN "${TIMVX_LIBRARY}" ELSE "NO")
+    status("    VIVANTE SDK path" VIVANTE_SDK_DIR THEN "${VIVANTE_SDK_DIR}" ELSE "NO")
+  endif()
+endif()
+
 if(WITH_OPENCL OR HAVE_OPENCL)
   ocv_build_features_string(opencl_features
     IF HAVE_OPENCL_SVM THEN "SVM"
@@ -1663,6 +1764,15 @@ if(WITH_ONNX OR HAVE_ONNX)
   if(HAVE_ONNX)
     status("    Include path:"  ONNX_INCLUDE_DIR THEN "${ONNX_INCLUDE_DIR}" ELSE "NO")
     status("    Link libraries:" ONNX_LIBRARIES THEN "${ONNX_LIBRARIES}" ELSE "NO")
+  endif()
+endif()
+
+if(WITH_CANN)
+  status("")
+  status("  CANN:"    HAVE_CANN THEN "YES" ELSE "NO")
+  if(HAVE_CANN)
+    status("    Include path"     CANN_INCLUDE_DIRS THEN "${CANN_INCLUDE_DIRS}" ELSE "NO")
+    status("    Link libraries:"  CANN_LIBRARIES    THEN "${CANN_LIBRARIES}"    ELSE "NO")
   endif()
 endif()
 
@@ -1702,9 +1812,10 @@ if(BUILD_JAVA)
   status("  Java:"            BUILD_FAT_JAVA_LIB  THEN "export all functions"                                      ELSE "")
   status("    ant:"           ANT_EXECUTABLE      THEN "${ANT_EXECUTABLE} (ver ${ANT_VERSION})"                    ELSE NO)
   if(NOT ANDROID)
+    status("    Java:"        Java_FOUND     THEN "YES (ver ${Java_VERSION})"                                      ELSE NO)
     status("    JNI:"         JNI_INCLUDE_DIRS    THEN "${JNI_INCLUDE_DIRS}"                                       ELSE NO)
   endif()
-  status("    Java wrappers:" HAVE_opencv_java                                                            THEN YES ELSE NO)
+  status("    Java wrappers:" HAVE_opencv_java                                                            THEN "YES (${OPENCV_JAVA_SDK_BUILD_TYPE})" ELSE NO)
   status("    Java tests:"    BUILD_TESTS AND opencv_test_java_BINARY_DIR                                 THEN YES ELSE NO)
 endif()
 

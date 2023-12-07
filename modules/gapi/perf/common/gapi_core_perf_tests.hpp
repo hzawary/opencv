@@ -62,7 +62,7 @@ namespace opencv_test
     class InRangePerfTest : public TestPerfParams<tuple<compare_f, cv::Size, MatType, cv::GCompileArgs>> {};
     class Split3PerfTest : public TestPerfParams<tuple<compare_f, cv::Size, cv::GCompileArgs>> {};
     class Split4PerfTest : public TestPerfParams<tuple<compare_f, cv::Size, cv::GCompileArgs>> {};
-    class Merge3PerfTest : public TestPerfParams<tuple<compare_f, cv::Size, cv::GCompileArgs>> {};
+    class Merge3PerfTest : public TestPerfParams<tuple<compare_f, cv::Size, MatType, cv::GCompileArgs>> {};
     class Merge4PerfTest : public TestPerfParams<tuple<compare_f, cv::Size, cv::GCompileArgs>> {};
     class RemapPerfTest : public TestPerfParams<tuple<compare_f, cv::Size, MatType, cv::GCompileArgs>> {};
     class FlipPerfTest : public TestPerfParams<tuple<compare_f, cv::Size, MatType, int, cv::GCompileArgs>> {};
@@ -78,10 +78,6 @@ namespace opencv_test
     class KMeans2DPerfTest : public TestPerfParams<tuple<int, int, cv::KmeansFlags, cv::GCompileArgs>> {};
     class KMeans3DPerfTest : public TestPerfParams<tuple<int, int, cv::KmeansFlags, cv::GCompileArgs>> {};
     class TransposePerfTest : public TestPerfParams<tuple<compare_f, cv::Size, MatType, cv::GCompileArgs>> {};
-    class ResizePerfTest : public TestPerfParams<tuple<compare_f, MatType, int, cv::Size, cv::Size, cv::GCompileArgs>> {};
-    class BottleneckKernelsConstInputPerfTest : public TestPerfParams<tuple<compare_f, std::string, cv::GCompileArgs>> {};
-    class ResizeFxFyPerfTest : public TestPerfParams<tuple<compare_f, MatType, int, cv::Size, double, double, cv::GCompileArgs>> {};
-    class ResizeInSimpleGraphPerfTest : public TestPerfParams<tuple<compare_f, MatType, cv::Size, double, double,  cv::GCompileArgs>> {};
     class ParseSSDBLPerfTest : public TestPerfParams<tuple<cv::Size, float, int, cv::GCompileArgs>>, public ParserSSDTest {};
     class ParseSSDPerfTest   : public TestPerfParams<tuple<cv::Size, float, bool, bool, cv::GCompileArgs>>, public ParserSSDTest {};
     class ParseYoloPerfTest  : public TestPerfParams<tuple<cv::Size, float, float, int, cv::GCompileArgs>>, public ParserYoloTest {};

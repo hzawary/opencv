@@ -79,5 +79,7 @@ namespace streaming
 namespace detail
 {
     gapi::GNetParam GAPI_EXPORTS_W strip(gapi::ie::PyParams params);
+    gapi::GNetParam GAPI_EXPORTS_W strip(gapi::onnx::PyParams params);
+    gapi::GNetParam GAPI_EXPORTS_W strip(gapi::ov::PyParams params);
 } // namespace detail
 } // namespace cv

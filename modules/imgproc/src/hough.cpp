@@ -68,6 +68,18 @@ struct hough_cmp_gt
     const int* aux;
 };
 
+static inline int
+computeNumangle( double min_theta, double max_theta, double theta_step )
+{
+    int numangle = cvFloor((max_theta - min_theta) / theta_step) + 1;
+    // If the distance between the first angle and the last angle is
+    // approximately equal to pi, then the last angle will be removed
+    // in order to prevent a line to be detected twice.
+    if ( numangle > 1 && fabs(CV_PI - (numangle-1)*theta_step) < theta_step/2 )
+        --numangle;
+    return numangle;
+}
+
 static void
 createTrigTable( int numangle, double min_theta, double theta_step,
                  float irho, float *tabSin, float *tabCos )
@@ -130,7 +142,7 @@ HoughLinesStandard( InputArray src, OutputArray lines, int type,
 
     CV_CheckGE(max_theta, min_theta, "max_theta must be greater than min_theta");
 
-    int numangle = cvRound((max_theta - min_theta) / theta);
+    int numangle = computeNumangle(min_theta, max_theta, theta);
     int numrho = cvRound(((max_rho - min_rho) + 1) / rho);
 
 #if defined HAVE_IPP && IPP_VERSION_X100 >= 810 && !IPP_DISABLE_HOUGH
@@ -475,7 +487,7 @@ HoughLinesProbabilistic( Mat& image,
     int width = image.cols;
     int height = image.rows;
 
-    int numangle = cvRound(CV_PI / theta);
+    int numangle = computeNumangle(0.0, CV_PI, theta);
     int numrho = cvRound(((width + height) * 2 + 1) / rho);
 
 #if defined HAVE_IPP && IPP_VERSION_X100 >= 810 && !IPP_DISABLE_HOUGH
@@ -792,7 +804,7 @@ static bool ocl_HoughLines(InputArray _src, OutputArray _lines, double rho, doub
     }
 
     UMat src = _src.getUMat();
-    int numangle = cvRound((max_theta - min_theta) / theta);
+    int numangle = computeNumangle(min_theta, max_theta, theta);
     int numrho = cvRound(((src.cols + src.rows) * 2 + 1) / rho);
 
     UMat pointsList;
@@ -846,7 +858,7 @@ static bool ocl_HoughLinesP(InputArray _src, OutputArray _lines, double rho, dou
     }
 
     UMat src = _src.getUMat();
-    int numangle = cvRound(CV_PI / theta);
+    int numangle = computeNumangle(0.0, CV_PI, theta);
     int numrho = cvRound(((src.cols + src.rows) * 2 + 1) / rho);
 
     UMat pointsList;
@@ -956,7 +968,7 @@ void HoughLinesPointSet( InputArray _point, OutputArray _lines, int lines_max, i
     int i;
     float irho = 1 / (float)rho_step;
     float irho_min = ((float)min_rho * irho);
-    int numangle = cvRound((max_theta - min_theta) / theta_step);
+    int numangle = computeNumangle(min_theta, max_theta, theta_step);
     int numrho = cvRound((max_rho - min_rho + 1) / rho_step);
 
     Mat _accum = Mat::zeros( (numangle+2), (numrho+2), CV_32SC1 );
@@ -1144,13 +1156,13 @@ public:
 
             for(; x < numCols; ++x )
             {
-#if CV_SIMD
+#if (CV_SIMD || CV_SIMD_SCALABLE)
                 {
                     v_uint8 v_zero = vx_setzero_u8();
 
-                    for(; x <= numCols - 2*v_uint8::nlanes; x += 2*v_uint8::nlanes) {
-                        v_uint8 v_edge1 = (vx_load(edgeData + x                  ) != v_zero);
-                        v_uint8 v_edge2 = (vx_load(edgeData + x + v_uint8::nlanes) != v_zero);
+                    for(; x <= numCols - 2*VTraits<v_uint8>::vlanes(); x += 2*VTraits<v_uint8>::vlanes()) {
+                        v_uint8 v_edge1 = (v_ne(vx_load(edgeData + x), v_zero));
+                        v_uint8 v_edge2 = (v_ne(vx_load(edgeData + x + VTraits<v_uint8>::vlanes()), v_zero));
 
                         if(v_check_any(v_edge1))
                         {
@@ -1160,7 +1172,7 @@ public:
 
                         if(v_check_any(v_edge2))
                         {
-                            x += v_uint8::nlanes + v_scan_forward(v_edge2);
+                            x += VTraits<v_uint8>::vlanes() + v_scan_forward(v_edge2);
                             goto _next_step;
                         }
                     }
@@ -1171,7 +1183,7 @@ public:
 
                 if(x == numCols)
                     continue;
-#if CV_SIMD
+#if (CV_SIMD || CV_SIMD_SCALABLE)
 _next_step:
 #endif
                 float vx, vy;
@@ -1502,7 +1514,7 @@ inline int HoughCircleEstimateRadiusInvoker<NZPointList>::filterCircles(const Po
     int nzCount = 0;
     const Point* nz_ = &nz[0];
     int j = 0;
-#if CV_SIMD
+#if (CV_SIMD || CV_SIMD_SCALABLE)
     {
         const v_float32 v_minRadius2 = vx_setall_f32(minRadius2);
         const v_float32 v_maxRadius2 = vx_setall_f32(maxRadius2);
@@ -1510,9 +1522,9 @@ inline int HoughCircleEstimateRadiusInvoker<NZPointList>::filterCircles(const Po
         v_float32 v_curCenterX = vx_setall_f32(curCenter.x);
         v_float32 v_curCenterY = vx_setall_f32(curCenter.y);
 
-        float CV_DECL_ALIGNED(CV_SIMD_WIDTH) rbuf[v_float32::nlanes];
-        int CV_DECL_ALIGNED(CV_SIMD_WIDTH) rmask[v_int32::nlanes];
-        for(; j <= nzSz - v_float32::nlanes; j += v_float32::nlanes)
+        float CV_DECL_ALIGNED(CV_SIMD_WIDTH) rbuf[VTraits<v_float32>::max_nlanes];
+        int CV_DECL_ALIGNED(CV_SIMD_WIDTH) rmask[VTraits<v_int32>::max_nlanes];
+        for(; j <= nzSz - VTraits<v_float32>::vlanes(); j += VTraits<v_float32>::vlanes())
         {
             v_float32 v_nzX, v_nzY;
             v_load_deinterleave((const float*)&nz_[j], v_nzX, v_nzY); // FIXIT use proper datatype
@@ -1520,16 +1532,16 @@ inline int HoughCircleEstimateRadiusInvoker<NZPointList>::filterCircles(const Po
             v_float32 v_x = v_cvt_f32(v_reinterpret_as_s32(v_nzX));
             v_float32 v_y = v_cvt_f32(v_reinterpret_as_s32(v_nzY));
 
-            v_float32 v_dx = v_x - v_curCenterX;
-            v_float32 v_dy = v_y - v_curCenterY;
+            v_float32 v_dx = v_sub(v_x, v_curCenterX);
+            v_float32 v_dy = v_sub(v_y, v_curCenterY);
 
-            v_float32 v_r2 = (v_dx * v_dx) + (v_dy * v_dy);
-            v_float32 vmask = (v_minRadius2 <= v_r2) & (v_r2 <= v_maxRadius2);
+            v_float32 v_r2 = v_add(v_mul(v_dx, v_dx), v_mul(v_dy, v_dy));
+            v_float32 vmask = v_and(v_le(v_minRadius2, v_r2), v_le(v_r2, v_maxRadius2));
             if (v_check_any(vmask))
             {
                 v_store_aligned(rmask, v_reinterpret_as_s32(vmask));
                 v_store_aligned(rbuf, v_r2);
-                for (int i = 0; i < v_int32::nlanes; ++i)
+                for (int i = 0; i < VTraits<v_int32>::vlanes(); ++i)
                     if (rmask[i]) ddata[nzCount++] = rbuf[i];
             }
         }
@@ -1561,13 +1573,13 @@ inline int HoughCircleEstimateRadiusInvoker<NZPointSet>::filterCircles(const Poi
     const Range xOuter = Range(std::max(int(curCenter.x - rOuter), 0), std::min(int(curCenter.x + rOuter), positions.cols));
     const Range yOuter = Range(std::max(int(curCenter.y - rOuter), 0), std::min(int(curCenter.y + rOuter), positions.rows));
 
-#if CV_SIMD
-    float v_seq[v_float32::nlanes];
-    for (int i = 0; i < v_float32::nlanes; ++i)
+#if (CV_SIMD || CV_SIMD_SCALABLE)
+    float v_seq[VTraits<v_float32>::max_nlanes];
+    for (int i = 0; i < VTraits<v_float32>::vlanes(); ++i)
         v_seq[i] = (float)i;
     const v_float32 v_minRadius2 = vx_setall_f32(minRadius2);
     const v_float32 v_maxRadius2 = vx_setall_f32(maxRadius2);
-    const v_float32 v_curCenterX_0123 = vx_setall_f32(curCenter.x) - vx_load(v_seq);
+    const v_float32 v_curCenterX_0123 = v_sub(vx_setall_f32(curCenter.x), vx_load(v_seq));
 #endif
 
     for (int y = yOuter.start; y < yOuter.end; y++)
@@ -1577,27 +1589,27 @@ inline int HoughCircleEstimateRadiusInvoker<NZPointSet>::filterCircles(const Poi
         float dy2 = dy * dy;
 
         int x = xOuter.start;
-#if CV_SIMD
+#if (CV_SIMD || CV_SIMD_SCALABLE)
         {
             const v_float32 v_dy2 = vx_setall_f32(dy2);
             const v_uint32 v_zero_u32 = vx_setall_u32(0);
-            float CV_DECL_ALIGNED(CV_SIMD_WIDTH) rbuf[v_float32::nlanes];
-            int CV_DECL_ALIGNED(CV_SIMD_WIDTH) rmask[v_int32::nlanes];
-            for (; x <= xOuter.end - v_float32::nlanes; x += v_float32::nlanes)
+            float CV_DECL_ALIGNED(CV_SIMD_WIDTH) rbuf[VTraits<v_float32>::max_nlanes];
+            int CV_DECL_ALIGNED(CV_SIMD_WIDTH) rmask[VTraits<v_int32>::max_nlanes];
+            for (; x <= xOuter.end - VTraits<v_float32>::vlanes(); x += VTraits<v_float32>::vlanes())
             {
                 v_uint32 v_mask = vx_load_expand_q(ptr + x);
-                v_mask = v_mask != v_zero_u32;
+                v_mask = v_ne(v_mask, v_zero_u32);
 
                 v_float32 v_x = v_cvt_f32(vx_setall_s32(x));
-                v_float32 v_dx = v_x - v_curCenterX_0123;
+                v_float32 v_dx = v_sub(v_x, v_curCenterX_0123);
 
-                v_float32 v_r2 = (v_dx * v_dx) + v_dy2;
-                v_float32 vmask = (v_minRadius2 <= v_r2) & (v_r2 <= v_maxRadius2) & v_reinterpret_as_f32(v_mask);
+                v_float32 v_r2 = v_add(v_mul(v_dx, v_dx), v_dy2);
+                v_float32 vmask = v_and(v_and(v_le(v_minRadius2, v_r2), v_le(v_r2, v_maxRadius2)), v_reinterpret_as_f32(v_mask));
                 if (v_check_any(vmask))
                 {
                     v_store_aligned(rmask, v_reinterpret_as_s32(vmask));
                     v_store_aligned(rbuf, v_r2);
-                    for (int i = 0; i < v_int32::nlanes; ++i)
+                    for (int i = 0; i < VTraits<v_int32>::vlanes(); ++i)
                         if (rmask[i]) ddata[nzCount++] = rbuf[i];
                 }
             }
@@ -2293,6 +2305,9 @@ static void HoughCircles( InputArray _image, OutputArray _circles,
         break;
     case HOUGH_GRADIENT_ALT:
         {
+            if( param2 >= 1 )
+                CV_Error( Error::StsOutOfRange, "when using HOUGH_GRADIENT_ALT method, param2 parameter must be smaller than 1.0" );
+
             std::vector<EstimatedCircle> circles;
             Mat image = _image.getMat();
             HoughCirclesAlt(image, circles, dp, minDist, minRadius, maxRadius, param1, param2);
@@ -2320,7 +2335,7 @@ static void HoughCircles( InputArray _image, OutputArray _circles,
         }
         break;
     default:
-        CV_Error( Error::StsBadArg, "Unrecognized method id. Actually only CV_HOUGH_GRADIENT is supported." );
+        CV_Error( Error::StsBadArg, "Unrecognized method id. Actually supported methods are HOUGH_GRADIENT and HOUGH_GRADIENT_ALT" );
     }
 }
 
